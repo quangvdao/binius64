@@ -13,6 +13,9 @@ binius-frontend = { path = "../" }
 rand.workspace = true
 clap.workspace = true
 
+[dev-dependencies]
+binius-circuits = { path = "../../circuits" }
+
 [features]
 default = []
 z3 = ["dep:z3"]
