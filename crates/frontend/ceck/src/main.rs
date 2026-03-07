@@ -1,25 +1,16 @@
-// Copyright 2025 Irreducible Inc.
-mod ast;
-mod parser;
-mod randblast;
-#[cfg(feature = "z3")]
-mod smt_check;
-mod translate;
+// Copyright 2025-2026 The Binius Developers
 
 use std::fs;
 
 use anyhow::{Result, anyhow};
-use clap::Parser as ClapParser;
-#[cfg(feature = "z3")]
-use z3::{Config, Context};
-
-#[cfg(feature = "z3")]
-use crate::smt_check::SmtChecker;
-use crate::{
+use ceck::{
 	ast::{ConstraintSet, TestItem},
 	parser::parse_test_file,
 	randblast::RandBlast,
 };
+use clap::Parser as ClapParser;
+#[cfg(feature = "z3")]
+use {ceck::smt_check::SmtChecker, z3::{Config, Context}};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum EquivalenceResult {
@@ -64,7 +55,7 @@ fn check_constraint_systems(
 	rhs_cs: &ConstraintSet,
 	args: &Args,
 ) -> Result<EquivalenceResult> {
-	let mut cx = translate::Context::new();
+	let mut cx = ceck::translate::Context::new();
 	cx.preprocess(lhs_cs);
 	cx.preprocess(rhs_cs);
 	cx.perform_witness_assignment();
