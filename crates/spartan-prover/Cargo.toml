@@ -30,8 +30,13 @@ tracing.workspace = true
 anyhow.workspace = true
 binius-hash = { path = "../hash" }
 binius-math = { path = "../math", features = ["test-utils"] }
+criterion.workspace = true
 rand = { workspace = true, features = ["thread_rng"] }
 smallvec.workspace = true
+
+[[bench]]
+name = "spartan_prove"
+harness = false
 
 [features]
 default = ["rayon"]
