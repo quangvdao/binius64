@@ -1,9 +1,10 @@
-// Copyright 2025 Irreducible Inc.
+// Copyright 2025-2026 The Binius Developers
 pub mod bitcoin_block_contains_transaction;
 pub mod bitcoin_header_chain;
 pub mod bitcoin_p2pkh;
 pub mod blake2b;
 pub mod blake2s;
+pub mod blake3;
 pub mod ethsign;
 pub mod hashsign;
 pub mod keccak;
