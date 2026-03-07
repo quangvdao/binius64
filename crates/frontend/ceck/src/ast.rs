@@ -1,4 +1,4 @@
-// Copyright 2025 Irreducible Inc.
+// Copyright 2025-2026 The Binius Developers
 use binius_core::constraint_system::ShiftVariant;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -7,6 +7,10 @@ pub enum ShiftOp {
 	Slr,
 	Sar,
 	Ror,
+	Sll32,
+	Slr32,
+	Sar32,
+	Ror32,
 }
 
 impl ShiftOp {
@@ -17,6 +21,10 @@ impl ShiftOp {
 			ShiftOp::Slr => ShiftVariant::Slr,
 			ShiftOp::Sar => ShiftVariant::Sar,
 			ShiftOp::Ror => ShiftVariant::Rotr,
+			ShiftOp::Sll32 => ShiftVariant::Sll32,
+			ShiftOp::Slr32 => ShiftVariant::Srl32,
+			ShiftOp::Sar32 => ShiftVariant::Sra32,
+			ShiftOp::Ror32 => ShiftVariant::Rotr32,
 		}
 	}
 }

@@ -1,4 +1,4 @@
-// Copyright 2025 Irreducible Inc.
+// Copyright 2025-2026 The Binius Developers
 use anyhow::{Result, anyhow};
 use pest::Parser;
 use pest_derive::Parser;
@@ -230,6 +230,10 @@ fn parse_shifted_term(pair: pest::iterators::Pair<Rule>) -> Result<Term> {
 		"slr" => ShiftOp::Slr,
 		"sar" => ShiftOp::Sar,
 		"ror" => ShiftOp::Ror,
+		"sll32" => ShiftOp::Sll32,
+		"slr32" => ShiftOp::Slr32,
+		"sar32" => ShiftOp::Sar32,
+		"ror32" => ShiftOp::Ror32,
 		_ => return Err(anyhow!("Unknown shift op: {}", shift_op.as_str())),
 	};
 
@@ -246,8 +250,13 @@ fn parse_shifted_term(pair: pest::iterators::Pair<Rule>) -> Result<Term> {
 		.parse::<usize>()
 		.map_err(|e| anyhow!("Invalid shift amount: {}", e))?;
 
-	if amount_val >= 64 {
-		return Err(anyhow!("Shift amount {} is out of range (must be < 64)", amount_val));
+	let is_32bit = matches!(op, ShiftOp::Sll32 | ShiftOp::Slr32 | ShiftOp::Sar32 | ShiftOp::Ror32);
+	let max_amount = if is_32bit { 32 } else { 64 };
+	if amount_val >= max_amount {
+		return Err(anyhow!(
+			"Shift amount {} is out of range (must be < {max_amount})",
+			amount_val
+		));
 	}
 
 	Ok(Term::Shifted {

@@ -1,4 +1,4 @@
-// Copyright 2025 Irreducible Inc.
+// Copyright 2025-2026 The Binius Developers
 use std::collections::BTreeMap;
 
 use binius_core::{
@@ -164,6 +164,10 @@ impl Context {
 					ShiftOp::Slr => ShiftedValueIndex::srl(index, *amount),
 					ShiftOp::Sar => ShiftedValueIndex::sar(index, *amount),
 					ShiftOp::Ror => ShiftedValueIndex::rotr(index, *amount),
+					ShiftOp::Sll32 => ShiftedValueIndex::sll32(index, *amount),
+					ShiftOp::Slr32 => ShiftedValueIndex::srl32(index, *amount),
+					ShiftOp::Sar32 => ShiftedValueIndex::sra32(index, *amount),
+					ShiftOp::Ror32 => ShiftedValueIndex::rotr32(index, *amount),
 				}
 			}
 		}

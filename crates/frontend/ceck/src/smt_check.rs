@@ -1,4 +1,4 @@
-// Copyright 2025 Irreducible Inc.
+// Copyright 2025-2026 The Binius Developers
 use anyhow::{Result, anyhow};
 use binius_core::constraint_system::{
 	AndConstraint, ConstraintSystem, MulConstraint, Operand, ShiftVariant, ShiftedValueIndex,
@@ -62,31 +62,33 @@ impl<'ctx> SmtChecker<'ctx> {
 			ShiftVariant::Slr => val.bvlshr(&ast::BV::from_u64(self.ctx, sv.amount as u64, 64)),
 			ShiftVariant::Sar => val.bvashr(&ast::BV::from_u64(self.ctx, sv.amount as u64, 64)),
 			ShiftVariant::Rotr => val.bvrotr(&ast::BV::from_u64(self.ctx, sv.amount as u64, 64)),
-			ShiftVariant::Sll32 => {
-				let shift = ast::BV::from_u64(self.ctx, sv.amount as u64, 32);
-				let hi = val.extract(63, 32);
-				let lo = val.extract(31, 0);
-				hi.bvshl(&shift).concat(&lo.bvshl(&shift))
-			}
-			ShiftVariant::Srl32 => {
-				let shift = ast::BV::from_u64(self.ctx, sv.amount as u64, 32);
-				let hi = val.extract(63, 32);
-				let lo = val.extract(31, 0);
-				hi.bvlshr(&shift).concat(&lo.bvlshr(&shift))
-			}
-			ShiftVariant::Sra32 => {
-				let shift = ast::BV::from_u64(self.ctx, sv.amount as u64, 32);
-				let hi = val.extract(63, 32);
-				let lo = val.extract(31, 0);
-				hi.bvashr(&shift).concat(&lo.bvashr(&shift))
-			}
-			ShiftVariant::Rotr32 => {
-				let rotate = ast::BV::from_u64(self.ctx, sv.amount as u64, 32);
-				let hi = val.extract(63, 32);
-				let lo = val.extract(31, 0);
-				hi.bvrotr(&rotate).concat(&lo.bvrotr(&rotate))
-			}
+			ShiftVariant::Sll32
+			| ShiftVariant::Srl32
+			| ShiftVariant::Sra32
+			| ShiftVariant::Rotr32 => self.eval_32bit_shift(val, sv.shift_variant, sv.amount),
 		}
+	}
+
+	/// Evaluate a 32-bit shift by operating independently on both 32-bit halves.
+	fn eval_32bit_shift(
+		&self,
+		val: &ast::BV<'ctx>,
+		variant: ShiftVariant,
+		amount: usize,
+	) -> ast::BV<'ctx> {
+		let lo = val.extract(31, 0);
+		let hi = val.extract(63, 32);
+		let amt32 = ast::BV::from_u64(self.ctx, amount as u64, 32);
+
+		let (lo_result, hi_result) = match variant {
+			ShiftVariant::Sll32 => (lo.bvshl(&amt32), hi.bvshl(&amt32)),
+			ShiftVariant::Srl32 => (lo.bvlshr(&amt32), hi.bvlshr(&amt32)),
+			ShiftVariant::Sra32 => (lo.bvashr(&amt32), hi.bvashr(&amt32)),
+			ShiftVariant::Rotr32 => (lo.bvrotr(&amt32), hi.bvrotr(&amt32)),
+			_ => unreachable!(),
+		};
+
+		hi_result.concat(&lo_result)
 	}
 
 	/// Evaluate an operand (XOR of shifted values)

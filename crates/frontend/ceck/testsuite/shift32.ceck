@@ -1,0 +1,80 @@
+; 32-bit shift operation tests
+; Tests sll32, slr32, sar32, ror32 -- operate on both 32-bit halves independently.
+
+; ror32 self-equivalence
+(assert_eqv
+  (constraint_set
+    (and (xor (ror32 $v0 16)) 0xFFFFFFFF_FFFFFFFF $v1)
+  )
+  (constraint_set
+    (and (xor (ror32 $v0 16)) 0xFFFFFFFF_FFFFFFFF $v1)
+  )
+)
+
+; Different 32-bit shift amounts are not equivalent
+(assert_not_eqv
+  (constraint_set
+    (and (xor (ror32 $v0 7)) 0xFFFFFFFF_FFFFFFFF $v1)
+  )
+  (constraint_set
+    (and (xor (ror32 $v0 8)) 0xFFFFFFFF_FFFFFFFF $v1)
+  )
+)
+
+; 32-bit shift left
+(assert_eqv
+  (constraint_set
+    (and (xor (sll32 $v0 4)) 0xFFFFFFFF_FFFFFFFF $v1)
+  )
+  (constraint_set
+    (and (xor (sll32 $v0 4)) 0xFFFFFFFF_FFFFFFFF $v1)
+  )
+)
+
+; 32-bit shift right logical
+(assert_eqv
+  (constraint_set
+    (and (xor (slr32 $v0 8)) 0xFFFFFFFF_FFFFFFFF $v1)
+  )
+  (constraint_set
+    (and (xor (slr32 $v0 8)) 0xFFFFFFFF_FFFFFFFF $v1)
+  )
+)
+
+; 32-bit arithmetic shift right
+(assert_eqv
+  (constraint_set
+    (and (xor (sar32 $v0 12)) 0xFFFFFFFF_FFFFFFFF $v1)
+  )
+  (constraint_set
+    (and (xor (sar32 $v0 12)) 0xFFFFFFFF_FFFFFFFF $v1)
+  )
+)
+
+; 64-bit ror != 32-bit ror32 (different semantics)
+(assert_not_eqv
+  (constraint_set
+    (and (xor (ror $v0 7)) 0xFFFFFFFF_FFFFFFFF $v1)
+  )
+  (constraint_set
+    (and (xor (ror32 $v0 7)) 0xFFFFFFFF_FFFFFFFF $v1)
+  )
+)
+
+; Mixed 32-bit shifts in XOR expression
+(assert_eqv
+  (constraint_set
+    (and
+      (xor (sll32 $v0 4) (slr32 $v1 2) (ror32 $v2 8))
+      0xFFFFFFFF_FFFFFFFF
+      $v3
+    )
+  )
+  (constraint_set
+    (and
+      (xor (sll32 $v0 4) (slr32 $v1 2) (ror32 $v2 8))
+      0xFFFFFFFF_FFFFFFFF
+      $v3
+    )
+  )
+)

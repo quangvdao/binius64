@@ -12,8 +12,8 @@ literal =  { hex_lit | dec_lit }
 // Wire identifiers
 wire_id = @{ "$" ~ ASCII_ALPHA ~ (ASCII_ALPHANUMERIC | "_")* }
 
-// Shift operations
-shift_op     =  { "sll" | "slr" | "sar" | "ror" }
+// Shift operations (64-bit and 32-bit variants)
+shift_op     =  { "sll32" | "slr32" | "sar32" | "ror32" | "sll" | "slr" | "sar" | "ror" }
 shift_amount = @{ ASCII_DIGIT+ }
 
 // Terms in XOR expressions

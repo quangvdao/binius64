@@ -1,4 +1,4 @@
-// Copyright 2025 Irreducible Inc.
+// Copyright 2025-2026 The Binius Developers
 use std::{path::PathBuf, process::Command};
 
 fn run_ceck_test(test_file: &str) -> Result<(), String> {
@@ -67,4 +67,9 @@ fn test_assertion_types() {
 #[test]
 fn test_smt_edge_cases() {
 	run_ceck_test("smt_edge_cases.ceck").expect("smt_edge_cases.ceck should pass");
+}
+
+#[test]
+fn test_shift32_operations() {
+	run_ceck_test("shift32.ceck").expect("shift32.ceck should pass");
 }
