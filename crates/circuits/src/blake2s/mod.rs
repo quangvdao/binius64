@@ -1,4 +1,4 @@
-// Copyright 2025 Irreducible Inc.
+// Copyright 2025-2026 The Binius Developers
 //! Blake2s hash function circuit implementation
 //!
 //! Blake2s is a cryptographic hash function optimized for 32-bit platforms,
@@ -39,7 +39,7 @@
 //!
 //! This circuit verifies that a given message produces a specific Blake2s digest.
 
-mod constants;
+pub(crate) mod constants;
 #[cfg(test)]
 mod tests;
 
