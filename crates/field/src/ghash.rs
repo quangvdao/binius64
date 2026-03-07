@@ -263,6 +263,8 @@ impl InvertOrZero for BinaryField128bGhash {
 	}
 }
 
+crate::arithmetic_traits::impl_trivial_widening_mul!(BinaryField128bGhash);
+
 impl From<u128> for BinaryField128bGhash {
 	#[inline]
 	fn from(value: u128) -> Self {

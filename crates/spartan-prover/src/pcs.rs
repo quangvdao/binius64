@@ -4,7 +4,7 @@
 
 use std::ops::Deref;
 
-use binius_field::{BinaryField, PackedExtension, PackedField};
+use binius_field::{BinaryField, PackedExtension, PackedField, WideningMul};
 use binius_math::{FieldBuffer, multilinear::eq::eq_ind_partial_eval, ntt::AdditiveNTT};
 use binius_prover::{
 	fri::{self, CommitOutput, FRIFoldProver},
@@ -97,7 +97,7 @@ where
 		transcript: &mut ProverTranscript<Challenger_>,
 	) -> Result<(), Error>
 	where
-		P: PackedField<Scalar = F> + PackedExtension<F>,
+		P: PackedField<Scalar = F> + PackedExtension<F> + WideningMul,
 		Challenger_: Challenger,
 	{
 		assert_eq!(
@@ -164,7 +164,7 @@ mod tests {
 		evaluation_claim: B128,
 	) -> Result<(), Box<dyn std::error::Error>>
 	where
-		P: PackedField<Scalar = B128> + PackedExtension<B128>,
+		P: PackedField<Scalar = B128> + PackedExtension<B128> + WideningMul,
 	{
 		let merkle_prover = BinaryMerkleTreeProver::<B128, StdDigest, _>::new(
 			ParallelCompressionAdaptor::new(StdCompression::default()),

@@ -32,7 +32,7 @@ mod wiring;
 
 use std::iter::{repeat_n, repeat_with};
 
-use binius_field::{BinaryField, Field, PackedExtension, PackedField};
+use binius_field::{BinaryField, Field, PackedExtension, PackedField, WideningMul};
 use binius_iop_prover::{basefold_compiler::BaseFoldProverCompiler, channel::IOPProverChannel};
 use binius_ip_prover::channel::IPProverChannel;
 use binius_math::{
@@ -91,7 +91,7 @@ impl<F, P, MerkleHash, ParallelMerkleCompress, ParallelMerkleHasher>
 	Prover<P, ParallelMerkleCompress, ParallelMerkleHasher>
 where
 	F: BinaryField,
-	P: PackedField<Scalar = F> + PackedExtension<F>,
+	P: PackedField<Scalar = F> + PackedExtension<F> + WideningMul,
 	MerkleHash: Digest + BlockSizeUser + FixedOutputReset,
 	ParallelMerkleHasher: ParallelDigest<Digest = MerkleHash>,
 	ParallelMerkleCompress: ParallelPseudoCompression<Output<MerkleHash>, 2>,

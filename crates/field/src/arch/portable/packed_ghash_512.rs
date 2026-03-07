@@ -20,3 +20,5 @@ define_packed_binary_fields!(
 		},
 	]
 );
+
+crate::arithmetic_traits::impl_trivial_widening_mul!(PackedBinaryGhash4x128b);

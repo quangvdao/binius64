@@ -2,7 +2,7 @@
 
 use std::marker::PhantomData;
 
-use binius_field::{BinaryField, FieldOps, PackedField};
+use binius_field::{BinaryField, FieldOps, PackedField, WideningMul};
 use binius_ip_prover::channel::IPProverChannel;
 use binius_math::{
 	field_buffer::FieldBuffer,
@@ -66,7 +66,7 @@ impl<'a, P, B, S, Channel> IntMulProver<'a, P, B, S, Channel> {
 impl<'a, F, P, B, S, Channel> IntMulProver<'a, P, B, S, Channel>
 where
 	F: BinaryField,
-	P: PackedField<Scalar = F>,
+	P: PackedField<Scalar = F> + WideningMul,
 	B: Bitwise,
 	S: AsRef<[B]> + Sync,
 	Channel: IPProverChannel<F>,

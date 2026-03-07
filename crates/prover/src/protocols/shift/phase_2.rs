@@ -3,7 +3,7 @@
 use std::iter;
 
 use binius_core::word::Word;
-use binius_field::{AESTowerField8b, BinaryField, Field, PackedField};
+use binius_field::{AESTowerField8b, BinaryField, Field, PackedField, WideningMul};
 use binius_ip_prover::channel::IPProverChannel;
 use binius_math::{
 	FieldBuffer,
@@ -49,7 +49,7 @@ use crate::{
 /// Returns `SumcheckOutput` containing the combined challenges `[r_j, r_y]` and witness evaluation,
 /// or an error if the protocol fails.
 #[instrument(skip_all, name = "prove_phase_2")]
-pub fn prove_phase_2<F, P: PackedField<Scalar = F>, Channel>(
+pub fn prove_phase_2<F, P: PackedField<Scalar = F> + WideningMul, Channel>(
 	inout_n_vars: usize,
 	key_collection: &KeyCollection,
 	words: &[Word],
@@ -159,7 +159,7 @@ fn compute_monster_with_inout<F: Field, P: PackedField<Scalar = F>>(
 /// # Returns
 /// Returns `SumcheckOutput` with concatenated challenges `[r_j, r_y]` and witness evaluation.
 #[instrument(skip_all, name = "run_sumcheck")]
-fn run_sumcheck<F: Field, P: PackedField<Scalar = F>, Channel: IPProverChannel<F>>(
+fn run_sumcheck<F: Field, P: PackedField<Scalar = F> + WideningMul, Channel: IPProverChannel<F>>(
 	inout_n_vars: usize,
 	r_j_witness: FieldBuffer<P>,
 	monster_multilinear: FieldBuffer<P>,
