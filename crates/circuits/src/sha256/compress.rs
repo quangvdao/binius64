@@ -1,4 +1,4 @@
-// Copyright 2025 Irreducible Inc.
+// Copyright 2025-2026 The Binius Developers
 use binius_core::word::Word;
 use binius_frontend::{CircuitBuilder, Wire};
 

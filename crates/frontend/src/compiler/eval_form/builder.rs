@@ -1,5 +1,4 @@
 // Copyright 2025-2026 The Binius Developers
-// Copyright 2025 Irreducible Inc.
 //! Bytecode builder for generating evaluation instructions
 
 /// Builder for constructing bytecode during circuit compilation

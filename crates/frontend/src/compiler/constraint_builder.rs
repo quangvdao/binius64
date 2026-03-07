@@ -1,4 +1,4 @@
-// Copyright 2025 Irreducible Inc.
+// Copyright 2025-2026 The Binius Developers
 use binius_core::constraint_system::{AndConstraint, MulConstraint, ShiftedValueIndex, ValueIndex};
 use cranelift_entity::{EntitySet, SecondaryMap};
 use smallvec::{SmallVec, smallvec};

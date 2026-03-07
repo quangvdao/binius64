@@ -1,5 +1,4 @@
 // Copyright 2025-2026 The Binius Developers
-// Copyright 2025 Irreducible Inc.
 //! 32-bit half-wise rotate right.
 //!
 //! Returns `z = x ROTR32 n`.

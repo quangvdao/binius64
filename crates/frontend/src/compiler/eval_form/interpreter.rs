@@ -1,5 +1,4 @@
 // Copyright 2025-2026 The Binius Developers
-// Copyright 2025 Irreducible Inc.
 //! Bytecode interpreter for circuit evaluation
 
 use binius_core::{ValueIndex, ValueVec, Word};

@@ -1,4 +1,4 @@
-// Copyright 2025 Irreducible Inc.
+// Copyright 2025-2026 The Binius Developers
 use binius_core::{verify::verify_constraints, word::Word};
 use proptest::prelude::*;
 use rand::{Rng, SeedableRng as _, rngs::StdRng};

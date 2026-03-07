@@ -1,4 +1,4 @@
-// Copyright 2025 Irreducible Inc.
+// Copyright 2025-2026 The Binius Developers
 //! linear expression graph.
 
 use cranelift_entity::EntitySet;
