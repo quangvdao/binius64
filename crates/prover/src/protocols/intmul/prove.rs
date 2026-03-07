@@ -6,7 +6,7 @@ use binius_field::{BinaryField, FieldOps, PackedField, WideningMul};
 use binius_ip_prover::channel::IPProverChannel;
 use binius_math::{
 	field_buffer::FieldBuffer,
-	inner_product::inner_product_buffers,
+	inner_product::inner_product_wide_buffers,
 	multilinear::{eq::eq_ind_partial_eval, evaluate::evaluate},
 };
 use binius_utils::{
@@ -222,7 +222,7 @@ where
 		let x_tensor = eq_ind_partial_eval(x_point);
 		let b_leaves_evals = b_leaves
 			.chunks_par(n_vars)
-			.map(|b_leaf| inner_product_buffers(&b_leaf, &x_tensor))
+			.map(|b_leaf| inner_product_wide_buffers(&b_leaf, &x_tensor))
 			.collect::<Vec<_>>();
 
 		// Write leaf evaluations to channel
