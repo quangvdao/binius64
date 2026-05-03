@@ -9,6 +9,7 @@ publish = false
 workspace = true
 
 [dependencies]
+binius-core = { path = "../core" }
 binius-field = { path = "../field" }
 binius-ip = { path = "../ip" }
 binius-ip-prover = { path = "../ip-prover" }
@@ -16,7 +17,6 @@ binius-math = { path = "../math" }
 binius-utils = { path = "../utils" }
 
 [dev-dependencies]
-binius-core = { path = "../core" }
 binius-prover = { path = "../prover" }
 binius-transcript = { path = "../transcript" }
 binius-verifier = { path = "../verifier" }

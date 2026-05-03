@@ -36,7 +36,10 @@ What has been implemented so far:
 - explicit folded `P`, `Q`, `R`, next-state, and iota columns over padded `(round_trace, lane)` rows;
 - a first full Spartan outer pass after the bit-axis univariate skip, using the production `QuadraticMleCheckProver` for the remaining degree-2 MLE-check rounds;
 - transcripted prover and verifier replay for the chi/iota segment, following the production BitAnd channel flow;
-- verifier-field row challenge support for the transcripted first-round message, so the row weights are derived from the same MLE-check point used by the verifier.
+- verifier-field row challenge support for the transcripted first-round message, so the row weights are derived from the same MLE-check point used by the verifier;
+- committed `A`/`D` witness layout helpers for the locked 32-word block layout;
+- committed witness construction from native Keccak traces, including materialized theta correction words and zero padding;
+- Shift-compatible operand helpers for virtual `B` references and `D` correctness relations.
 
 Important lessons from the initial implementation:
 
@@ -194,8 +197,8 @@ The production BitAnd full-zerocheck benchmark measured approximately **24.8 ms*
 
 The next implementation milestone is to connect the transcripted chi/iota segment to the locked-in committed-witness path:
 
-1. Implement `layout.rs` helpers for the 32-word block indexing above.
-2. Implement witness construction for committed `A` and `D` words, with `B` kept virtual.
-3. Represent `D` correctness and virtual `B` references as production Shift-compatible shifted operands, then reuse the Shift two-phase reduction for the folded `P`, `Q`, and `C` claims.
+1. Lower the folded `P`, `Q`, and `C` chi claims through the virtual `B` operands into committed `A` and `D` words.
+2. Batch the `D` correctness operands as linear, Shift-compatible relations.
+3. Reuse the Shift two-phase reduction to reduce the chi and `D` linear claims to committed witness evaluations.
 4. Integrate boundary openings for committed input/output states through the same ring-switching and PCS opening path used after production Shift.
 5. Add an end-to-end benchmark against the generic `binius-examples` Keccak circuit path, while keeping the current microbenches as regression tripwires.
