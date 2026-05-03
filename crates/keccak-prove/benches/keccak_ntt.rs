@@ -3,7 +3,7 @@
 use std::hint::black_box;
 
 use binius_core::word::Word;
-use binius_field::{AESTowerField8b, PackedAESBinaryField16x8b, Random};
+use binius_field::{AESTowerField8b, Field, PackedAESBinaryField16x8b, Random};
 use binius_keccak_prove::{
 	bit_ntt::{NttLookup, upper_half_domains, upper_half_residual_evals},
 	round_message::{
@@ -25,6 +25,7 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use rand::{Rng, SeedableRng, rngs::StdRng};
 
 const KECCAK_BENCH_PERMS: usize = 128;
+const KECCAK_SCALE_BATCH_PERMS: usize = 2048;
 const KECCAK_ROUNDS_PER_PERM: usize = 24;
 const KECCAK_LANES_PER_ROUND: usize = binius_keccak_prove::constants::N_LANES;
 
@@ -213,6 +214,48 @@ fn bench_production_bitand_round_message(c: &mut Criterion) {
 	}
 }
 
+fn bench_keccak_first_round_claim_scale(c: &mut Criterion) {
+	let (input_domain, output_domain) = upper_half_domains::<AESTowerField8b>();
+	let lookup = NttLookup::<PackedAESBinaryField16x8b>::new(&input_domain, &output_domain);
+
+	let mut rng = StdRng::seed_from_u64(13);
+	let traces: Vec<_> = (0..KECCAK_SCALE_BATCH_PERMS)
+		.map(|_| PermutationTrace::new(rng.random::<State>()))
+		.collect();
+	let round_traces: Vec<_> = traces.iter().flat_map(|trace| trace.rounds).collect();
+	let small_eq_weights: Vec<_> = (0..round_traces.len() * KECCAK_LANES_PER_ROUND)
+		.map(|_| rng.random::<AESTowerField8b>())
+		.collect();
+	let first_round_challenge = B128::random(&mut rng);
+
+	let mut group = c.benchmark_group("keccak_first_round_claim_scale");
+	group.sample_size(10);
+
+	for repeat_batches in [1, 2, 4, 8, 16, 32] {
+		let total_perms = KECCAK_SCALE_BATCH_PERMS * repeat_batches;
+		let total_constraints = total_perms * KECCAK_ROUNDS_PER_PERM * KECCAK_LANES_PER_ROUND;
+		group.throughput(Throughput::Elements(total_constraints as u64));
+		group.bench_function(
+			BenchmarkId::new("first_round_claim_small_par", total_perms),
+			|bench| {
+				bench.iter(|| {
+					let mut claim_sum = B128::ZERO;
+					for _ in 0..repeat_batches {
+						claim_sum +=
+							par_first_round_claim_small_weights::<B128, PackedAESBinaryField16x8b>(
+								&lookup,
+								&round_traces,
+								&small_eq_weights,
+								first_round_challenge,
+							);
+					}
+					black_box(claim_sum)
+				});
+			},
+		);
+	}
+}
+
 fn bench_production_bitand_round_message_size(c: &mut Criterion, log_num_rows: usize) {
 	let log_num_words = log_num_rows - SKIPPED_VARS;
 	let mut rng = StdRng::seed_from_u64(12);
@@ -274,6 +317,7 @@ criterion_group!(
 	keccak_ntt,
 	bench_ntt_lookup,
 	bench_keccak_residuals,
+	bench_keccak_first_round_claim_scale,
 	bench_production_bitand_round_message
 );
 criterion_main!(keccak_ntt);

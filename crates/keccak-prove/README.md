@@ -37,6 +37,7 @@ They track three baselines while the prover path is still being assembled:
 - `upper_half_round_message_seq` and `upper_half_round_message_par`: Keccak chi/iota extension-domain accumulation with big-field lane weights.
 - `upper_half_round_message_small_seq` and `upper_half_round_message_small_par`: the production-shaped variant that keeps lane weights packed in the NTT field and widens only after accumulation.
 - `first_round_claim_small_par`: the production-shaped first-round flow, including upper-half accumulation, full 128-point message construction with zero base-domain values, and extrapolation at a verifier challenge.
+- `keccak_first_round_claim_scale`: a 2048-permutation batch sweep, repeated up to 65,536 effective permutations with Criterion `sample_size(10)` to track where first-round work crosses roughly 500 ms.
 - `production_bitand_lookup_precompute`: the existing Binius64 BitAnd lookup setup, using the same domain shape.
 - `production_bitand_reference`: the existing Binius64 BitAnd univariate round-message hot path.
 
