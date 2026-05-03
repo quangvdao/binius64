@@ -17,8 +17,9 @@ use binius_keccak_prove::{
 		prove_spartan_outer_from_folded_columns_with_claim_packed,
 		prove_spartan_outer_from_folded_columns_with_claim_packed_fused,
 		prove_spartan_outer_from_packed_folded_columns_with_claim,
-		prove_spartan_outer_from_packed_folded_columns_with_claim_fused, upper_half_round_message,
-		upper_half_round_message_small_weights,
+		prove_spartan_outer_from_packed_folded_columns_with_claim_fused,
+		prove_spartan_outer_from_packed_folded_columns_with_claim_persistent_fused,
+		upper_half_round_message, upper_half_round_message_small_weights,
 	},
 	trace::{PermutationTrace, RoundTrace, State},
 	v0,
@@ -680,6 +681,31 @@ fn bench_keccak_spartan_outer_scale(c: &mut Criterion) {
 				bench.iter(|| {
 					black_box(
 						prove_spartan_outer_from_packed_folded_columns_with_claim_fused::<
+							B128,
+							OptimalPackedB128,
+						>(
+							packed_columns.clone(),
+							first_round_challenge,
+							zerocheck_challenges.clone(),
+							&sumcheck_challenges,
+							folded_claim,
+						)
+						.unwrap(),
+					)
+				});
+			},
+		);
+
+		group.throughput(Throughput::Elements(total_constraints as u64));
+		group.bench_function(
+			BenchmarkId::new(
+				"prove_from_packed_folded_columns_persistent_fused_distinct",
+				total_perms,
+			),
+			|bench| {
+				bench.iter(|| {
+					black_box(
+						prove_spartan_outer_from_packed_folded_columns_with_claim_persistent_fused::<
 							B128,
 							OptimalPackedB128,
 						>(

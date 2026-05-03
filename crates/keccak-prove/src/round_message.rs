@@ -839,6 +839,27 @@ where
 	)
 }
 
+/// Run the persistent-worker fused post-skip outer pass from pre-packed folded columns.
+pub fn prove_spartan_outer_from_packed_folded_columns_with_claim_persistent_fused<F, P>(
+	columns: PackedFoldedOuterColumns<P>,
+	first_round_challenge: F,
+	zerocheck_challenges: Vec<F>,
+	sumcheck_challenges: &[F],
+	folded_claim: F,
+) -> Result<SpartanOuterPass<F>, SumcheckError>
+where
+	F: BinaryField + Field,
+	P: PackedField<Scalar = F> + Send + Sync,
+{
+	prove_spartan_outer_from_packed_buffers_persistent_fused::<F, P>(
+		columns.into_packed_field_buffers(),
+		first_round_challenge,
+		zerocheck_challenges,
+		sumcheck_challenges,
+		folded_claim,
+	)
+}
+
 fn prove_spartan_outer_from_folded_columns<FChallenge>(
 	columns: FoldedOuterColumns<FChallenge>,
 	first_round_challenge: FChallenge,
@@ -1015,6 +1036,74 @@ where
 	})
 }
 
+fn prove_spartan_outer_from_packed_buffers_persistent_fused<F, P>(
+	packed_buffers: [FieldBuffer<P>; 3],
+	first_round_challenge: F,
+	zerocheck_challenges: Vec<F>,
+	sumcheck_challenges: &[F],
+	folded_claim: F,
+) -> Result<SpartanOuterPass<F>, SumcheckError>
+where
+	F: BinaryField + Field,
+	P: PackedField<Scalar = F> + Send + Sync,
+{
+	let log_rows = packed_buffers[0].log_len();
+	assert_eq!(packed_buffers[1].log_len(), log_rows);
+	assert_eq!(packed_buffers[2].log_len(), log_rows);
+	assert_eq!(zerocheck_challenges.len(), log_rows);
+	assert_eq!(sumcheck_challenges.len(), log_rows);
+
+	let full_zerocheck_challenges = zerocheck_challenges.clone();
+	let mut state = PackedFusedOuterState::new(packed_buffers, &zerocheck_challenges);
+	let mut round_messages = Vec::with_capacity(log_rows);
+	let mut last_eval = folded_claim;
+	let rounds_done = state.run_persistent_parallel_prefix(
+		&zerocheck_challenges,
+		sumcheck_challenges,
+		&mut last_eval,
+		&mut round_messages,
+	);
+
+	let remaining_vars = log_rows - rounds_done;
+	let packed_buffers = state.into_truncated_packed_buffers(remaining_vars);
+	if remaining_vars > 0 {
+		let tail = prove_spartan_outer_from_packed_buffers(
+			packed_buffers,
+			first_round_challenge,
+			zerocheck_challenges[..remaining_vars].to_vec(),
+			&sumcheck_challenges[rounds_done..],
+			last_eval,
+		)?;
+		round_messages.extend(tail.round_messages);
+		return Ok(SpartanOuterPass {
+			first_round_challenge,
+			folded_claim,
+			zerocheck_challenges: full_zerocheck_challenges,
+			round_messages,
+			sumcheck_challenges: sumcheck_challenges.to_vec(),
+			multilinear_evals: tail.multilinear_evals,
+			final_eval: tail.final_eval,
+		});
+	}
+
+	let multilinear_evals = [
+		packed_buffers[0].get(0),
+		packed_buffers[1].get(0),
+		packed_buffers[2].get(0),
+	];
+	let final_eval = multilinear_evals[0] * multilinear_evals[1] - multilinear_evals[2];
+
+	Ok(SpartanOuterPass {
+		first_round_challenge,
+		folded_claim,
+		zerocheck_challenges: full_zerocheck_challenges,
+		round_messages,
+		sumcheck_challenges: sumcheck_challenges.to_vec(),
+		multilinear_evals,
+		final_eval,
+	})
+}
+
 fn packed_reduce_round<F, P>(
 	buffers: &[FieldBuffer<P>; 3],
 	eq: &FieldBuffer<P>,
@@ -1153,6 +1242,349 @@ where
 			((p_1 * q_1 - c_1) * eq_i, ((p_0 + p_1) * (q_0 + q_1)) * eq_i)
 		}
 	}
+}
+
+#[derive(Clone, Copy)]
+struct PackedOuterPartial<P> {
+	y_1: P,
+	y_inf: P,
+}
+
+impl<P> PackedOuterPartial<P>
+where
+	P: PackedField,
+{
+	fn zero() -> Self {
+		Self {
+			y_1: P::zero(),
+			y_inf: P::zero(),
+		}
+	}
+
+	fn add_assign(&mut self, rhs: Self) {
+		self.y_1 += rhs.y_1;
+		self.y_inf += rhs.y_inf;
+	}
+
+	fn to_outer_partial(self) -> OuterPartial<P::Scalar> {
+		OuterPartial {
+			y_1: sum_packed(self.y_1),
+			y_inf: sum_packed(self.y_inf),
+		}
+	}
+}
+
+struct PackedPartialSlots<P>(Vec<UnsafeCell<PackedOuterPartial<P>>>);
+
+// SAFETY: each worker writes only its own slot, and worker 0 reads slots only after the phase
+// barrier proves every active writer has completed.
+unsafe impl<P: Send> Sync for PackedPartialSlots<P> {}
+
+struct SharedPackedOuterColumns<P: PackedField> {
+	p: UnsafeCell<FieldBuffer<P>>,
+	q: UnsafeCell<FieldBuffer<P>>,
+	c: UnsafeCell<FieldBuffer<P>>,
+	eq: UnsafeCell<FieldBuffer<P>>,
+}
+
+// SAFETY: all parallel methods partition packed-word ranges into disjoint windows. Each write lands
+// in the low live prefix owned by that worker; high halves are read-only for the current round.
+unsafe impl<P: PackedField + Send> Sync for SharedPackedOuterColumns<P> {}
+
+struct PackedFusedOuterState<P: PackedField> {
+	columns: SharedPackedOuterColumns<P>,
+	log_rows: usize,
+}
+
+impl<P> PackedFusedOuterState<P>
+where
+	P: PackedField + Send + Sync,
+	P::Scalar: BinaryField + Field,
+{
+	fn new(packed_buffers: [FieldBuffer<P>; 3], zerocheck_challenges: &[P::Scalar]) -> Self {
+		let [p, q, c] = packed_buffers;
+		let log_rows = p.log_len();
+		let eq = eq_ind_partial_eval::<P>(&zerocheck_challenges[..log_rows.saturating_sub(1)]);
+		Self {
+			log_rows,
+			columns: SharedPackedOuterColumns {
+				p: UnsafeCell::new(p),
+				q: UnsafeCell::new(q),
+				c: UnsafeCell::new(c),
+				eq: UnsafeCell::new(eq),
+			},
+		}
+	}
+
+	fn run_persistent_parallel_prefix(
+		&mut self,
+		zerocheck_challenges: &[P::Scalar],
+		sumcheck_challenges: &[P::Scalar],
+		last_eval: &mut P::Scalar,
+		round_messages: &mut Vec<RoundCoeffs<P::Scalar>>,
+	) -> usize {
+		let plans = self.parallel_round_plans();
+		let max_workers = plans.iter().map(|plan| plan.workers).max().unwrap_or(1);
+		if max_workers < 2 {
+			return 0;
+		}
+
+		let partials = PackedPartialSlots(
+			(0..max_workers)
+				.map(|_| UnsafeCell::new(PackedOuterPartial::zero()))
+				.collect(),
+		);
+		let barrier = Barrier::new(max_workers);
+
+		thread::scope(|scope| {
+			for worker_idx in 1..max_workers {
+				let partials = &partials;
+				let barrier = &barrier;
+				let state = &*self;
+				let plans = &plans;
+				scope.spawn(move || {
+					for plan in plans {
+						if worker_idx < plan.workers {
+							let (lo, hi) =
+								static_chunk_range(plan.reduce_words, plan.workers, worker_idx);
+							let partial = if plan.abs_round == 0 {
+								state.reduce_round(plan.reduce_words, lo, hi)
+							} else {
+								state.bind_then_reduce_round(
+									plan.n_vars,
+									plan.reduce_words,
+									lo,
+									hi,
+									sumcheck_challenges[plan.abs_round - 1],
+								)
+							};
+							// SAFETY: this worker is the unique writer for its slot.
+							unsafe {
+								*partials.0[worker_idx].get() = partial;
+							}
+						}
+						barrier.wait();
+						if worker_idx < plan.workers && plan.n_vars > 1 {
+							let next_eq_words = plan.reduce_words >> 1;
+							let (lo, hi) =
+								static_chunk_range(next_eq_words, plan.workers, worker_idx);
+							state.truncate_eq_round(next_eq_words, lo, hi);
+						}
+						barrier.wait();
+					}
+
+					if let Some(last_plan) = plans.last()
+						&& worker_idx < last_plan.workers
+					{
+						let (lo, hi) = static_chunk_range(
+							last_plan.reduce_words,
+							last_plan.workers,
+							worker_idx,
+						);
+						state.bind_round(
+							last_plan.reduce_words,
+							lo,
+							hi,
+							sumcheck_challenges[last_plan.abs_round],
+						);
+					}
+				});
+			}
+
+			for plan in &plans {
+				let (lo, hi) = static_chunk_range(plan.reduce_words, plan.workers, 0);
+				let partial = if plan.abs_round == 0 {
+					self.reduce_round(plan.reduce_words, lo, hi)
+				} else {
+					self.bind_then_reduce_round(
+						plan.n_vars,
+						plan.reduce_words,
+						lo,
+						hi,
+						sumcheck_challenges[plan.abs_round - 1],
+					)
+				};
+				// SAFETY: worker 0 is the unique writer for slot 0.
+				unsafe {
+					*partials.0[0].get() = partial;
+				}
+				barrier.wait();
+
+				let mut sum = PackedOuterPartial::zero();
+				for slot in &partials.0[..plan.workers] {
+					// SAFETY: all workers reached the barrier after writing their slots.
+					sum.add_assign(unsafe { *slot.get() });
+				}
+				let alpha = zerocheck_challenges[plan.n_vars - 1];
+				let coeffs = sum.to_outer_partial().interpolate_eq(*last_eval, alpha);
+				*last_eval = coeffs.evaluate(sumcheck_challenges[plan.abs_round]);
+				round_messages.push(coeffs);
+
+				if plan.n_vars > 1 {
+					let next_eq_words = plan.reduce_words >> 1;
+					let (lo, hi) = static_chunk_range(next_eq_words, plan.workers, 0);
+					self.truncate_eq_round(next_eq_words, lo, hi);
+				}
+				barrier.wait();
+			}
+
+			if let Some(last_plan) = plans.last() {
+				let (lo, hi) = static_chunk_range(last_plan.reduce_words, last_plan.workers, 0);
+				self.bind_round(
+					last_plan.reduce_words,
+					lo,
+					hi,
+					sumcheck_challenges[last_plan.abs_round],
+				);
+			}
+		});
+
+		plans.len()
+	}
+
+	fn parallel_round_plans(&self) -> Vec<PackedParallelRoundPlan> {
+		let mut plans = Vec::new();
+		let mut workers = keccak_outer_max_workers().max(1);
+		let min_reduce_words = keccak_packed_fused_min_reduce_words();
+		let min_words_per_worker = keccak_packed_outer_min_words_per_worker();
+
+		for abs_round in 0..self.log_rows {
+			let n_vars = self.log_rows - abs_round;
+			if n_vars <= P::LOG_WIDTH {
+				break;
+			}
+			let reduce_words = 1 << (n_vars - 1 - P::LOG_WIDTH);
+			if abs_round > 0 && reduce_words < min_reduce_words {
+				break;
+			}
+			workers = workers.min(reduce_words);
+			while workers >= 2 && reduce_words / workers < min_words_per_worker {
+				workers /= 2;
+			}
+			if workers < 2 {
+				break;
+			}
+			plans.push(PackedParallelRoundPlan {
+				abs_round,
+				n_vars,
+				reduce_words,
+				workers,
+			});
+		}
+
+		plans
+	}
+
+	fn reduce_round(&self, reduce_words: usize, lo: usize, hi: usize) -> PackedOuterPartial<P> {
+		// SAFETY: reduce is read-only over the current live prefix.
+		let p = unsafe { (&*self.columns.p.get()).as_ref() };
+		let q = unsafe { (&*self.columns.q.get()).as_ref() };
+		let c = unsafe { (&*self.columns.c.get()).as_ref() };
+		let eq = unsafe { (&*self.columns.eq.get()).as_ref() };
+		let mut partial = PackedOuterPartial::zero();
+		for i in lo..hi {
+			let p_1 = p[i + reduce_words];
+			let q_1 = q[i + reduce_words];
+			let c_1 = c[i + reduce_words];
+			let weight = eq[i];
+			partial.y_1 += (p_1 * q_1 - c_1) * weight;
+			partial.y_inf += ((p[i] + p_1) * (q[i] + q_1)) * weight;
+		}
+		partial
+	}
+
+	fn bind_then_reduce_round(
+		&self,
+		n_vars: usize,
+		reduce_words: usize,
+		lo: usize,
+		hi: usize,
+		prev_challenge: P::Scalar,
+	) -> PackedOuterPartial<P> {
+		debug_assert!(n_vars > P::LOG_WIDTH);
+		let bind_offset = 1 << (n_vars - P::LOG_WIDTH);
+		let challenge = P::broadcast(prev_challenge);
+		let p = unsafe { (&mut *self.columns.p.get()).as_mut() };
+		let q = unsafe { (&mut *self.columns.q.get()).as_mut() };
+		let c = unsafe { (&mut *self.columns.c.get()).as_mut() };
+		let eq = unsafe { (&*self.columns.eq.get()).as_ref() };
+		let mut partial = PackedOuterPartial::zero();
+
+		for i in lo..hi {
+			let i_hi = i + bind_offset;
+			let p_0 = p[i] + challenge * (p[i_hi] - p[i]);
+			let q_0 = q[i] + challenge * (q[i_hi] - q[i]);
+			let c_0 = c[i] + challenge * (c[i_hi] - c[i]);
+			p[i] = p_0;
+			q[i] = q_0;
+			c[i] = c_0;
+
+			let j = i + reduce_words;
+			let j_hi = j + bind_offset;
+			let p_1 = p[j] + challenge * (p[j_hi] - p[j]);
+			let q_1 = q[j] + challenge * (q[j_hi] - q[j]);
+			let c_1 = c[j] + challenge * (c[j_hi] - c[j]);
+			p[j] = p_1;
+			q[j] = q_1;
+			c[j] = c_1;
+
+			let weight = eq[i];
+			partial.y_1 += (p_1 * q_1 - c_1) * weight;
+			partial.y_inf += ((p_0 + p_1) * (q_0 + q_1)) * weight;
+		}
+
+		partial
+	}
+
+	fn bind_round(&self, reduce_words: usize, lo: usize, hi: usize, challenge: P::Scalar) {
+		let challenge = P::broadcast(challenge);
+		let p = unsafe { (&mut *self.columns.p.get()).as_mut() };
+		let q = unsafe { (&mut *self.columns.q.get()).as_mut() };
+		let c = unsafe { (&mut *self.columns.c.get()).as_mut() };
+		for i in lo..hi {
+			let p_lo = p[i];
+			let q_lo = q[i];
+			let c_lo = c[i];
+			p[i] = p_lo + challenge * (p[i + reduce_words] - p_lo);
+			q[i] = q_lo + challenge * (q[i + reduce_words] - q_lo);
+			c[i] = c_lo + challenge * (c[i + reduce_words] - c_lo);
+		}
+	}
+
+	fn truncate_eq_round(&self, next_eq_words: usize, lo: usize, hi: usize) {
+		let eq = unsafe { (&mut *self.columns.eq.get()).as_mut() };
+		for i in lo..hi {
+			let high = eq[i + next_eq_words];
+			eq[i] += high;
+		}
+	}
+
+	fn into_truncated_packed_buffers(self, log_len: usize) -> [FieldBuffer<P>; 3] {
+		let mut buffers = [
+			self.columns.p.into_inner(),
+			self.columns.q.into_inner(),
+			self.columns.c.into_inner(),
+		];
+		for buffer in &mut buffers {
+			buffer.truncate(log_len);
+		}
+		buffers
+	}
+}
+
+#[derive(Clone, Copy)]
+struct PackedParallelRoundPlan {
+	abs_round: usize,
+	n_vars: usize,
+	reduce_words: usize,
+	workers: usize,
+}
+
+fn keccak_packed_outer_min_words_per_worker() -> usize {
+	std::env::var("KECCAK_PACKED_OUTER_MIN_WORDS_PER_WORKER")
+		.ok()
+		.and_then(|value| value.parse().ok())
+		.unwrap_or(1 << 14)
 }
 
 fn split_bind_reduce_slices<P>(
@@ -1971,18 +2403,31 @@ mod tests {
 			B128,
 			OptimalPackedB128,
 		>(
-			packed_columns,
+			packed_columns.clone(),
 			first_round_challenge,
-			zerocheck_challenges,
+			zerocheck_challenges.clone(),
 			&sumcheck_challenges,
 			folded_claim,
 		)
 		.unwrap();
+		let prepacked_persistent_fused =
+			prove_spartan_outer_from_packed_folded_columns_with_claim_persistent_fused::<
+				B128,
+				OptimalPackedB128,
+			>(
+				packed_columns,
+				first_round_challenge,
+				zerocheck_challenges,
+				&sumcheck_challenges,
+				folded_claim,
+			)
+			.unwrap();
 
 		assert_eq!(packed_generic, generic);
 		assert_eq!(prepacked_generic, generic);
 		assert_eq!(packed_fused, generic);
 		assert_eq!(prepacked_fused, generic);
+		assert_eq!(prepacked_persistent_fused, generic);
 	}
 
 	#[test]

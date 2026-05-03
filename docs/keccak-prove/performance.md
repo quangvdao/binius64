@@ -497,6 +497,73 @@ The next useful direction is therefore not more process-level affinity tuning. I
 fused bind/reduce idea into a packed-field backend, or into the production `QuadraticMleCheckProver`
 shape where the bind and reduce can be fused without abandoning `FieldBuffer` packing.
 
+### Packed Persistent-Worker Outer Experiment
+
+The next experiment moved the persistent-worker idea back onto packed `FieldBuffer` columns:
+
+```text
+prove_spartan_outer_from_packed_folded_columns_with_claim_persistent_fused(...)
+```
+
+This path keeps the same algebraic shape as the fair packed fused prover. The only Fiat-Shamir
+barrier is between round messages: once the previous challenge is available, each worker streams a
+static packed-word range, binds the previous challenge, and accumulates the next round's message
+from the just-bound values in the same pass. Round 0 is reduce-only, because there is no previous
+challenge yet. After the persistent prefix, the prover binds the last produced challenge, truncates
+the packed columns, and hands the small tail back to the generic packed quadratic prover.
+
+Two knobs control the current experiment:
+
+```text
+KECCAK_PACKED_FUSED_MIN_REDUCE_WORDS=65536
+KECCAK_PACKED_OUTER_MIN_WORDS_PER_WORKER=16384
+```
+
+The first is the tail switchover threshold shared with the Rayon fused packed path. The second is
+the adaptive-worker shrinkage threshold for the persistent path. A `leopard` 32-worker threshold
+sweep at 32,768 permutations measured:
+
+| `KECCAK_PACKED_OUTER_MIN_WORDS_PER_WORKER` | Persistent packed fused, 32 workers |
+|---:|---:|
+| 8,192 | 495.3 ms |
+| 16,384 | 482.3 ms |
+| 32,768 | 498.6 ms |
+| 65,536 | 493.3 ms |
+
+So the default is currently 16,384 packed words per active worker. This confirms that adaptive
+worker shrinkage matters, but it does not create a 32-thread breakthrough by itself.
+
+On `leopard` native with `KECCAK_PACKED_OUTER_MIN_WORDS_PER_WORKER=4096`, the fair comparison was:
+
+| Threads | 8,192 Rayon fused | 8,192 persistent | 16,384 Rayon fused | 16,384 persistent | 32,768 Rayon fused | 32,768 persistent |
+|---:|---:|---:|---:|---:|---:|---:|
+| 12 | 128.1 ms | 129.2 ms | 256.8 ms | 253.0 ms | 488.6 ms | 492.5 ms |
+| 16 | 131.4 ms | 131.7 ms | 247.3 ms | 248.1 ms | 478.2 ms | 478.7 ms |
+| 32 | 131.6 ms | 134.4 ms | 253.4 ms | 252.7 ms | 495.9 ms | 494.9 ms |
+
+With the tuned 16,384-word threshold and 16 persistent workers, the target sweep measured:
+
+| Keccak-f permutations | Persistent packed fused |
+|---:|---:|
+| 8,192 | 131.6 ms |
+| 16,384 | 249.8 ms |
+| 32,768 | 485.7 ms |
+
+The result is useful but sobering: persistent workers plus fused bind/reduce reaches parity with
+Rayon on the outer pass, and sometimes wins a few percent, but it does not solve the full 32-logical
+thread utilization problem. The remaining likely bottleneck is not the Fiat-Shamir barrier itself;
+it is the per-round streaming kernel's bandwidth/cache behavior. Every round reads and writes large
+packed buffers, then the live domain halves. More logical workers increase L3/SMT contention and
+barrier traffic before they add useful arithmetic throughput.
+
+The strongest next implementation direction is therefore a larger grain of parallelism, not just a
+different per-round scheduler: prove independent Keccak batches concurrently with separate
+transcripts or independent sumcheck instances, then aggregate their claims. That exposes coarse
+work to all physical cores without forcing every worker to synchronize on every sumcheck round.
+Within one sumcheck instance, the next lower-level experiment would be a hand-pinned worker pool
+with explicit CCD partitioning and hardware-counter measurements under a lower
+`perf_event_paranoid` setting, to distinguish memory bandwidth from arithmetic-port saturation.
+
 ## Full-Path Checkpoint
 
 For 128 Keccak-f permutations:
