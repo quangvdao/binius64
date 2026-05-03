@@ -5,6 +5,7 @@
 use std::iter;
 
 use binius_field::{BinaryField, Field, PackedField};
+use binius_math::{BinarySubspace, univariate::extrapolate_over_subspace};
 use binius_utils::rayon::prelude::*;
 
 use crate::{
@@ -147,6 +148,55 @@ where
 	std::array::from_fn(|i| FChallenge::from(P::iter_slice(&packed_acc).nth(i).unwrap()))
 }
 
+/// Build the full first-round message evaluations expected by the verifier.
+///
+/// The first half is the original 64-point bit domain, where valid residuals are zero. The second
+/// half is the shifted upper-half extension domain sent by the prover.
+pub fn first_round_message_evals<FChallenge>(
+	upper_half_message: &[FChallenge; LANE_BITS],
+) -> Vec<FChallenge>
+where
+	FChallenge: Field,
+{
+	let mut message_evals = vec![FChallenge::ZERO; 2 * LANE_BITS];
+	message_evals[LANE_BITS..2 * LANE_BITS].copy_from_slice(upper_half_message);
+	message_evals
+}
+
+/// Extrapolate the first-round message at the verifier's univariate challenge.
+pub fn next_sum_claim_from_upper_half<FChallenge>(
+	upper_half_message: &[FChallenge; LANE_BITS],
+	challenge: FChallenge,
+	prover_message_domain: &BinarySubspace<FChallenge>,
+) -> FChallenge
+where
+	FChallenge: BinaryField + Field,
+{
+	let first_round_message_evals = first_round_message_evals(upper_half_message);
+
+	extrapolate_over_subspace(&prover_message_domain, &first_round_message_evals, challenge)
+}
+
+/// Production-shaped first-round flow for Keccak chi/iota constraints.
+pub fn par_first_round_claim_small_weights<FChallenge, P>(
+	lookup: &NttLookup<P>,
+	round_traces: &[RoundTrace],
+	eq_weights: &[P::Scalar],
+	challenge: FChallenge,
+) -> FChallenge
+where
+	FChallenge: BinaryField + Field + From<P::Scalar> + Send + Sync,
+	P: PackedField,
+	P::Scalar: BinaryField + Field,
+{
+	let upper_half_message =
+		par_upper_half_round_message_small_weights(lookup, round_traces, eq_weights);
+	let prover_message_domain =
+		BinarySubspace::<P::Scalar>::with_dim(crate::bit_ntt::LOG_LANE_BITS + 1)
+			.isomorphic::<FChallenge>();
+	next_sum_claim_from_upper_half(&upper_half_message, challenge, &prover_message_domain)
+}
+
 fn accumulate_round_trace<FChallenge, P>(
 	lookup: &NttLookup<P>,
 	round_trace: &RoundTrace,
@@ -273,6 +323,42 @@ mod tests {
 				&small_weights
 			),
 			upper_half_round_message(&lookup, &round_traces, &big_weights)
+		);
+	}
+
+	#[test]
+	fn first_round_claim_matches_manual_extrapolation() {
+		let mut rng = StdRng::seed_from_u64(15);
+		let lookup = NttLookup::<P>::for_upper_half_domain();
+		let mut trace = PermutationTrace::new(rng.random::<State>());
+		trace.rounds[5].output[0] ^= 0x0101_0101_0101_0101;
+
+		let round_traces = round_traces(&trace);
+		let small_weights: Vec<_> = (0..N_ROUNDS * N_LANES)
+			.map(|_| rng.random::<AESTowerField8b>())
+			.collect();
+		let challenge = B128::random(&mut rng);
+		let prover_message_domain =
+			BinarySubspace::<AESTowerField8b>::with_dim(crate::bit_ntt::LOG_LANE_BITS + 1)
+				.isomorphic::<B128>();
+		let upper_half = par_upper_half_round_message_small_weights::<B128, P>(
+			&lookup,
+			&round_traces,
+			&small_weights,
+		);
+		let message_evals = first_round_message_evals(&upper_half);
+		assert_eq!(message_evals.len(), 2 * LANE_BITS);
+		assert_eq!(&message_evals[..LANE_BITS], [B128::ZERO; LANE_BITS]);
+		assert_eq!(&message_evals[LANE_BITS..], upper_half);
+
+		assert_eq!(
+			par_first_round_claim_small_weights::<B128, P>(
+				&lookup,
+				&round_traces,
+				&small_weights,
+				challenge
+			),
+			next_sum_claim_from_upper_half(&upper_half, challenge, &prover_message_domain)
 		);
 	}
 }

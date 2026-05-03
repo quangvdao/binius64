@@ -7,8 +7,9 @@ use binius_field::{AESTowerField8b, PackedAESBinaryField16x8b, Random};
 use binius_keccak_prove::{
 	bit_ntt::{NttLookup, upper_half_domains, upper_half_residual_evals},
 	round_message::{
-		par_upper_half_round_message, par_upper_half_round_message_small_weights,
-		upper_half_round_message, upper_half_round_message_small_weights,
+		par_first_round_claim_small_weights, par_upper_half_round_message,
+		par_upper_half_round_message_small_weights, upper_half_round_message,
+		upper_half_round_message_small_weights,
 	},
 	trace::{PermutationTrace, State},
 };
@@ -110,6 +111,7 @@ fn bench_keccak_residuals(c: &mut Criterion) {
 	let small_eq_weights: Vec<_> = (0..round_traces.len() * KECCAK_LANES_PER_ROUND)
 		.map(|_| rng.random::<AESTowerField8b>())
 		.collect();
+	let first_round_challenge = B128::random(&mut rng);
 
 	let mut group = c.benchmark_group("keccak_residuals");
 
@@ -189,6 +191,18 @@ fn bench_keccak_residuals(c: &mut Criterion) {
 					&small_eq_weights,
 				),
 			)
+		});
+	});
+
+	group.throughput(Throughput::Elements(accumulator_constraints as u64));
+	group.bench_function("first_round_claim_small_par/128_perms", |bench| {
+		bench.iter(|| {
+			black_box(par_first_round_claim_small_weights::<B128, PackedAESBinaryField16x8b>(
+				&lookup,
+				&round_traces,
+				&small_eq_weights,
+				first_round_challenge,
+			))
 		});
 	});
 }
