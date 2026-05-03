@@ -12,5 +12,6 @@
 pub mod bit_ntt;
 pub mod constants;
 pub mod operands;
+pub mod round_message;
 pub mod trace;
 pub mod unrolled;

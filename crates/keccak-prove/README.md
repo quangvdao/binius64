@@ -34,7 +34,9 @@ They track three baselines while the prover path is still being assembled:
 
 - `direct_lagrange_word`: slow, obviously correct evaluation of one 64-bit lane on the shifted upper-half domain.
 - `byte_lookup_word` and `keccak_lookup_precompute`: the Keccak-local byte NTT lookup path.
+- `upper_half_round_message_seq` and `upper_half_round_message_par`: Keccak chi/iota extension-domain accumulation across many round traces.
 - `production_bitand_lookup_precompute`: the existing Binius64 BitAnd lookup setup, using the same domain shape.
+- `production_bitand_reference`: the existing Binius64 BitAnd univariate round-message hot path.
 
 For broader production comparisons, also run:
 

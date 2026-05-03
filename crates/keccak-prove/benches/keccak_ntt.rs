@@ -2,13 +2,21 @@
 
 use std::hint::black_box;
 
-use binius_field::{AESTowerField8b, PackedAESBinaryField16x8b};
+use binius_core::word::Word;
+use binius_field::{AESTowerField8b, PackedAESBinaryField16x8b, Random};
 use binius_keccak_prove::{
 	bit_ntt::{NttLookup, upper_half_domains, upper_half_residual_evals},
+	round_message::{par_upper_half_round_message, upper_half_round_message},
 	trace::{PermutationTrace, State},
 };
-use binius_math::{BinarySubspace, univariate::lagrange_evals_scalars};
-use binius_prover::and_reduction::prover_setup::ntt_lookup_from_prover_message_domain;
+use binius_math::{
+	BinarySubspace, multilinear::eq::eq_ind_partial_eval, univariate::lagrange_evals_scalars,
+};
+use binius_prover::and_reduction::{
+	prover_setup::ntt_lookup_from_prover_message_domain,
+	sumcheck_round_messages::univariate_round_message_extension_domain,
+};
+use binius_verifier::{config::B128, protocols::bitand::SKIPPED_VARS};
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use rand::{Rng, SeedableRng, rngs::StdRng};
 
@@ -85,6 +93,10 @@ fn bench_keccak_residuals(c: &mut Criterion) {
 	let traces: Vec<_> = (0..128)
 		.map(|_| PermutationTrace::new(rng.random::<State>()))
 		.collect();
+	let round_traces: Vec<_> = traces.iter().flat_map(|trace| trace.rounds).collect();
+	let eq_weights: Vec<_> = (0..round_traces.len() * binius_keccak_prove::constants::N_LANES)
+		.map(|_| B128::from(rng.random::<AESTowerField8b>()))
+		.collect();
 
 	let mut group = c.benchmark_group("keccak_residuals");
 	group.throughput(Throughput::Elements((traces.len() * 24) as u64));
@@ -117,7 +129,86 @@ fn bench_keccak_residuals(c: &mut Criterion) {
 			},
 		);
 	}
+
+	group.bench_function("upper_half_round_message_seq/128_perms", |bench| {
+		bench.iter(|| {
+			black_box(upper_half_round_message::<B128, PackedAESBinaryField16x8b>(
+				&lookup,
+				&round_traces,
+				&eq_weights,
+			))
+		});
+	});
+
+	group.bench_function("upper_half_round_message_par/128_perms", |bench| {
+		bench.iter(|| {
+			black_box(par_upper_half_round_message::<B128, PackedAESBinaryField16x8b>(
+				&lookup,
+				&round_traces,
+				&eq_weights,
+			))
+		});
+	});
 }
 
-criterion_group!(keccak_ntt, bench_ntt_lookup, bench_keccak_residuals);
+fn bench_production_bitand_round_message(c: &mut Criterion) {
+	let log_num_rows = 12;
+	let log_num_words = log_num_rows - SKIPPED_VARS;
+	let mut rng = StdRng::seed_from_u64(12);
+	let small_field_zerocheck_challenges = [
+		AESTowerField8b::new(2),
+		AESTowerField8b::new(4),
+		AESTowerField8b::new(16),
+	];
+	let big_field_zerocheck_challenges =
+		vec![
+			B128::random(&mut rng);
+			log_num_rows - SKIPPED_VARS - small_field_zerocheck_challenges.len()
+		];
+	let eq_ind_big_field_challenges = eq_ind_partial_eval(&big_field_zerocheck_challenges);
+
+	let first_col: Vec<_> = (0..1 << log_num_words)
+		.map(|_| Word(rng.random()))
+		.collect();
+	let second_col: Vec<_> = (0..1 << log_num_words)
+		.map(|_| Word(rng.random()))
+		.collect();
+	let third_col: Vec<_> = first_col
+		.iter()
+		.zip(&second_col)
+		.map(|(&a, &b)| a & b)
+		.collect();
+
+	let prover_message_domain = BinarySubspace::with_dim(SKIPPED_VARS + 1);
+	let ntt_lookup =
+		ntt_lookup_from_prover_message_domain::<PackedAESBinaryField16x8b>(prover_message_domain);
+
+	let mut group = c.benchmark_group("production_bitand_reference");
+	group.throughput(Throughput::Elements(1 << log_num_words));
+	group.bench_function(
+		BenchmarkId::new("univariate_round_message_extension_domain", log_num_rows),
+		|bench| {
+			bench.iter(|| {
+				black_box(univariate_round_message_extension_domain::<
+					B128,
+					PackedAESBinaryField16x8b,
+				>(
+					&first_col,
+					&second_col,
+					&third_col,
+					&eq_ind_big_field_challenges,
+					&ntt_lookup,
+					&small_field_zerocheck_challenges,
+				))
+			});
+		},
+	);
+}
+
+criterion_group!(
+	keccak_ntt,
+	bench_ntt_lookup,
+	bench_keccak_residuals,
+	bench_production_bitand_round_message
+);
 criterion_main!(keccak_ntt);
