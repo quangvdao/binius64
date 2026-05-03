@@ -1,6 +1,6 @@
 // Copyright 2026 The Binius Developers
 
-use std::{hint::black_box, time::Duration};
+use std::{env, hint::black_box, time::Duration};
 
 use binius_core::{constraint_system::Operand, word::Word};
 use binius_field::{AESTowerField8b, Field, PackedAESBinaryField16x8b, Random};
@@ -234,7 +234,7 @@ fn bench_keccak_v0_production_path(c: &mut Criterion) {
 	group.sample_size(10);
 	group.measurement_time(Duration::from_secs(6));
 
-	for n_permutations in [1, 16, 128] {
+	for n_permutations in v0_production_path_perm_counts() {
 		let mut rng = StdRng::seed_from_u64(20 + n_permutations as u64);
 		let traces: Vec<_> = (0..n_permutations)
 			.map(|_| PermutationTrace::new(rng.random::<State>()))
@@ -290,6 +290,23 @@ fn bench_keccak_v0_production_path(c: &mut Criterion) {
 			},
 		);
 	}
+}
+
+fn v0_production_path_perm_counts() -> Vec<usize> {
+	env::var("KECCAK_V0_PRODUCTION_PERMS")
+		.ok()
+		.map(|value| {
+			value
+				.split(',')
+				.map(str::trim)
+				.filter(|part| !part.is_empty())
+				.map(|part| {
+					part.parse::<usize>()
+						.expect("KECCAK_V0_PRODUCTION_PERMS must be comma-separated usize values")
+				})
+				.collect()
+		})
+		.unwrap_or_else(|| vec![1, 16, 128])
 }
 
 fn bench_keccak_v0_structured_verifier(c: &mut Criterion) {
