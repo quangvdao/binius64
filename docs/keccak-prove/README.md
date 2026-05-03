@@ -35,7 +35,8 @@ What has been implemented so far:
 - a folded post-first-challenge claim check that directly folds each lane word and matches the verifier's extrapolated next claim;
 - explicit folded `P`, `Q`, `R`, next-state, and iota columns over padded `(round_trace, lane)` rows;
 - a first full Spartan outer pass after the bit-axis univariate skip, using the production `QuadraticMleCheckProver` for the remaining degree-2 MLE-check rounds;
-- transcripted prover and verifier replay for the chi/iota segment, following the production BitAnd channel flow.
+- transcripted prover and verifier replay for the chi/iota segment, following the production BitAnd channel flow;
+- verifier-field row challenge support for the transcripted first-round message, so the row weights are derived from the same MLE-check point used by the verifier.
 
 Important lessons from the initial implementation:
 
@@ -48,7 +49,8 @@ Important lessons from the initial implementation:
 - Microbenchmarks must report constraints processed per iteration. Earlier raw timings compared very different workloads and overstated the gap to production BitAnd.
 - The current first-round claim path is still only the first sumcheck-message layer, not an end-to-end Keccak proof. It does not yet include folding through subsequent sumcheck rounds, transcript integration, committed input/output boundary openings, or full proof serialization.
 - The post-skip outer pass uses the MLE-check identity from production Binius, so each remaining round message is tied to the current zerocheck coordinate by `(1 - alpha) r(0) + alpha r(1)`, not by the vanilla `r(0) + r(1)` sumcheck identity.
-- The transcripted segment currently links the first-round message to the post-skip MLE-check when the row weights are the equality tensor for the verifier's row point. The next fidelity improvement is to port BitAnd's split small/big challenge accumulation so the univariate message can take verifier-field row challenges directly.
+- The transcripted segment now links the first-round message to the post-skip MLE-check using the verifier's full row point. The packed small-field path is still useful as a fast benchmark/reference, but it is no longer a correctness restriction for transcript replay.
+- Production Shift reduces BitAnd and IntMul claims through a two-phase protocol: a `g * h` sumcheck over bit/shift variables, followed by a bivariate product against the folded committed witness and the monster multilinear. The Keccak linear-layer pushback should be expressed in that shape. A custom direct claim rewrite over the current `(round_trace, lane)` rows would be a different, less production-faithful design.
 
 Observed benchmark checkpoint on this machine:
 
@@ -128,9 +130,9 @@ The production BitAnd full-zerocheck benchmark measured approximately **24.8 ms*
 
 ## Next steps
 
-The next implementation milestone is to make the transcripted chi/iota segment fully production-faithful:
+The next implementation milestone is to connect the transcripted chi/iota segment to the committed-witness path:
 
-1. Port BitAnd's split small/big row-challenge accumulation into Keccak's first-round message, replacing the current small-field row-weight limitation.
-2. Integrate boundary openings for committed input/output states.
-3. Push folded `P`, `Q`, and `C` claims backward through the Keccak linear layer (`pi`, `rho`, `theta`) instead of treating pre-chi lanes as terminal columns.
+1. Decide the committed-witness layout for Keccak state words so input, round-boundary, and output lanes have stable word indices.
+2. Represent the Keccak linear layer (`theta`, `rho`, `pi`) as production Shift-compatible shifted operands or an equivalent `KeyCollection`-style relation, then reuse the Shift two-phase reduction for the folded `P`, `Q`, and `C` claims.
+3. Integrate boundary openings for committed input/output states through the same ring-switching and PCS opening path used after production Shift.
 4. Add an end-to-end benchmark against the generic `binius-examples` Keccak circuit path, while keeping the current microbenches as regression tripwires.

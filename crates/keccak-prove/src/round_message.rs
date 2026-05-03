@@ -213,6 +213,42 @@ where
 	next_sum_claim_from_upper_half(&upper_half_message, challenge, &prover_message_domain)
 }
 
+/// Build the row equality weights for the padded `(round_trace, lane)` row space.
+///
+/// The active Keccak rows are a linear prefix of the padded Boolean hypercube used by the
+/// remaining MLE-check. The prover's first-round message must use the same row point that the
+/// verifier supplies to the MLE-check, so these weights are derived directly from those
+/// challenges.
+pub fn row_eq_weights<F>(row_count: usize, row_challenges: &[F]) -> Vec<F>
+where
+	F: Field,
+{
+	assert_eq!(row_challenges.len(), row_count.next_power_of_two().ilog2() as usize);
+	let weights = eq_ind_partial_eval_scalars(row_challenges);
+	weights[..row_count].to_vec()
+}
+
+/// Production-shaped first-round flow for verifier-field row challenges.
+pub fn par_first_round_claim_from_row_challenges<FChallenge, P>(
+	lookup: &NttLookup<P>,
+	round_traces: &[RoundTrace],
+	row_challenges: &[FChallenge],
+	challenge: FChallenge,
+) -> FChallenge
+where
+	FChallenge: BinaryField + Field + From<P::Scalar> + Send + Sync,
+	P: PackedField,
+	P::Scalar: BinaryField + Field,
+{
+	let row_count = round_traces.len() * N_LANES;
+	let eq_weights = row_eq_weights(row_count, row_challenges);
+	let upper_half_message = par_upper_half_round_message(lookup, round_traces, &eq_weights);
+	let prover_message_domain =
+		BinarySubspace::<P::Scalar>::with_dim(crate::bit_ntt::LOG_LANE_BITS + 1)
+			.isomorphic::<FChallenge>();
+	next_sum_claim_from_upper_half(&upper_half_message, challenge, &prover_message_domain)
+}
+
 /// Compute the post-first-challenge claim by directly folding each lane word.
 ///
 /// This is a correctness-oriented bridge toward the remaining sumcheck rounds. It mirrors the
@@ -477,22 +513,20 @@ where
 pub fn prove_spartan_outer_with_channel<FChallenge, P, Channel>(
 	lookup: &NttLookup<P>,
 	round_traces: &[RoundTrace],
-	eq_weights: &[P::Scalar],
 	zerocheck_challenges: Vec<FChallenge>,
 	channel: &mut Channel,
 ) -> Result<SpartanOuterTranscriptOutput<FChallenge>, SumcheckError>
 where
-	FChallenge: BinaryField + Field + From<P::Scalar> + WithUnderlier,
+	FChallenge: BinaryField + Field + From<P::Scalar> + Send + Sync + WithUnderlier,
 	FChallenge::Underlier: UnderlierWithBitOps,
 	P: PackedField,
 	P::Scalar: BinaryField + Field,
 	Channel: IPProverChannel<FChallenge>,
 {
-	let upper_half_message = par_upper_half_round_message_small_weights::<FChallenge, P>(
-		lookup,
-		round_traces,
-		eq_weights,
-	);
+	let row_count = round_traces.len() * N_LANES;
+	let eq_weights = row_eq_weights(row_count, &zerocheck_challenges);
+	let upper_half_message =
+		par_upper_half_round_message::<FChallenge, P>(lookup, round_traces, &eq_weights);
 	channel.send_many(&upper_half_message);
 
 	let z_challenge = channel.sample();
@@ -828,6 +862,40 @@ mod tests {
 	}
 
 	#[test]
+	fn first_round_claim_from_row_challenges_matches_manual_weights() {
+		let mut rng = StdRng::seed_from_u64(18);
+		let lookup = NttLookup::<P>::for_upper_half_domain();
+		let traces: Vec<_> = (0..2)
+			.map(|_| PermutationTrace::new(rng.random::<State>()))
+			.collect();
+		let round_traces: Vec<_> = traces.iter().flat_map(|trace| trace.rounds).collect();
+		let row_count = round_traces.len() * N_LANES;
+		let log_rows = row_count.next_power_of_two().ilog2() as usize;
+		let row_challenges: Vec<_> = (0..log_rows).map(|_| B128::random(&mut rng)).collect();
+		let first_round_challenge = B128::random(&mut rng);
+		let eq_weights = row_eq_weights(row_count, &row_challenges);
+		let upper_half =
+			par_upper_half_round_message::<B128, P>(&lookup, &round_traces, &eq_weights);
+		let prover_message_domain =
+			BinarySubspace::<AESTowerField8b>::with_dim(crate::bit_ntt::LOG_LANE_BITS + 1)
+				.isomorphic::<B128>();
+
+		assert_eq!(
+			par_first_round_claim_from_row_challenges::<B128, P>(
+				&lookup,
+				&round_traces,
+				&row_challenges,
+				first_round_challenge,
+			),
+			next_sum_claim_from_upper_half(
+				&upper_half,
+				first_round_challenge,
+				&prover_message_domain
+			)
+		);
+	}
+
+	#[test]
 	fn spartan_outer_pass_runs_after_univariate_skip() {
 		let mut rng = StdRng::seed_from_u64(16);
 		let traces: Vec<_> = (0..2)
@@ -892,22 +960,12 @@ mod tests {
 			.collect();
 		let round_traces: Vec<_> = traces.iter().flat_map(|trace| trace.rounds).collect();
 		let log_rows = (round_traces.len() * N_LANES).next_power_of_two().ilog2() as usize;
-		let small_zerocheck_challenges: Vec<_> = (0..log_rows)
-			.map(|_| rng.random::<AESTowerField8b>())
-			.collect();
-		let zerocheck_challenges: Vec<_> = small_zerocheck_challenges
-			.iter()
-			.copied()
-			.map(B128::from)
-			.collect();
-		let small_weights = eq_ind_partial_eval_scalars(&small_zerocheck_challenges);
-		let small_weights = small_weights[..round_traces.len() * N_LANES].to_vec();
+		let zerocheck_challenges: Vec<_> = (0..log_rows).map(|_| B128::random(&mut rng)).collect();
 
 		let mut prover_transcript = ProverTranscript::<StdChallenger>::default();
 		let prove_output = prove_spartan_outer_with_channel::<B128, P, _>(
 			&lookup,
 			&round_traces,
-			&small_weights,
 			zerocheck_challenges.clone(),
 			&mut prover_transcript,
 		)
