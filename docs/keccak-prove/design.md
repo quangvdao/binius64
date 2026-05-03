@@ -17,7 +17,7 @@ We rebuild without that scaffolding, supervised, one PR at a time.
 What is dropped:
 
 - two-sumcheck-per-round prototype,
-- `oblong_round` and packed-suffix variants (regressed in the worktree's own benchmarks),
+- `oblong_round` and packed-suffix variants,
 - explicit pre-chi point-opening layer,
 - generic Jolt-style virtual-claim DAG.
 
@@ -323,7 +323,7 @@ This is the pure "Lagrange pack" view of univariate skip, restricted to evaluati
 ## Open knobs to settle by benchmark, not by argument
 
 - `c_inst` on the instance axis. Initial value 1.
-- 1-sumcheck-fused vs 2-sumcheck-per-round. Initial choice 1-sumcheck-fused. The 2-sumcheck variant has lighter per-cube-point cost but worse transcript and inversion counts; the prior worktree's measurement said 1-sumcheck wins, but a tight 2-sumcheck implementation has not been measured against the current 1-sumcheck implementation. Worth re-running once both exist.
+- 1-sumcheck-fused vs 2-sumcheck-per-round. Initial choice 1-sumcheck-fused. The 2-sumcheck variant has lighter per-cube-point cost but worse transcript and inversion counts. Worth re-running once both exist.
 - Whether to commit at every $R$ rounds. Initial $R = 24$ (Option A, only input and output committed). Option B (flattened trace) is not implemented in v0.
 - Switch from $\mathrm{GF}(2^{128})$ challenges to $\mathrm{GF}(2^{64})$. Saves one factor of 2 per multiplication if soundness budget allows. Out of v0.
 

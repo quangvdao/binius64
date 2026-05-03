@@ -7,9 +7,17 @@ use binius_field::{AESTowerField8b, Field, PackedAESBinaryField16x8b, Random};
 use binius_keccak_prove::{
 	bit_ntt::{NttLookup, upper_half_domains, upper_half_residual_evals},
 	round_message::{
-		folded_outer_claim, folded_outer_columns, par_first_round_claim_small_weights,
-		par_upper_half_round_message, par_upper_half_round_message_small_weights,
-		prove_spartan_outer_after_first_round_with_claim, upper_half_round_message,
+		folded_outer_claim, folded_outer_columns, pack_folded_outer_columns,
+		par_first_round_claim_small_weights, par_upper_half_round_message,
+		par_upper_half_round_message_small_weights,
+		prove_spartan_outer_after_first_round_with_claim,
+		prove_spartan_outer_after_first_round_with_claim_fused_adaptive,
+		prove_spartan_outer_from_folded_columns_with_claim,
+		prove_spartan_outer_from_folded_columns_with_claim_fused_adaptive,
+		prove_spartan_outer_from_folded_columns_with_claim_packed,
+		prove_spartan_outer_from_folded_columns_with_claim_packed_fused,
+		prove_spartan_outer_from_packed_folded_columns_with_claim,
+		prove_spartan_outer_from_packed_folded_columns_with_claim_fused, upper_half_round_message,
 		upper_half_round_message_small_weights,
 	},
 	trace::{PermutationTrace, RoundTrace, State},
@@ -480,6 +488,22 @@ fn bench_keccak_spartan_outer(c: &mut Criterion) {
 			)
 		});
 	});
+
+	group.throughput(Throughput::Elements(total_constraints as u64));
+	group.bench_function("prove_after_univariate_skip_fused_adaptive/128_perms", |bench| {
+		bench.iter(|| {
+			black_box(prove_spartan_outer_after_first_round_with_claim_fused_adaptive::<
+				B128,
+				PackedAESBinaryField16x8b,
+			>(
+				&round_traces,
+				first_round_challenge,
+				zerocheck_challenges.clone(),
+				&sumcheck_challenges,
+				folded_claim,
+			))
+		});
+	});
 }
 
 fn bench_keccak_spartan_outer_scale(c: &mut Criterion) {
@@ -504,6 +528,7 @@ fn bench_keccak_spartan_outer_scale(c: &mut Criterion) {
 			&round_traces,
 			first_round_challenge,
 		);
+		let packed_columns = pack_folded_outer_columns::<B128, OptimalPackedB128>(columns.clone());
 		let folded_claim = folded_outer_claim(&columns, &zerocheck_challenges);
 		let sumcheck_challenges: Vec<_> = (0..log_rows).map(|_| B128::random(&mut rng)).collect();
 		let total_constraints = total_perms * KECCAK_ROUNDS_PER_PERM * KECCAK_LANES_PER_ROUND;
@@ -519,6 +544,148 @@ fn bench_keccak_spartan_outer_scale(c: &mut Criterion) {
 							PackedAESBinaryField16x8b,
 						>(
 							&round_traces,
+							first_round_challenge,
+							zerocheck_challenges.clone(),
+							&sumcheck_challenges,
+							folded_claim,
+						)
+						.unwrap(),
+					)
+				});
+			},
+		);
+
+		group.throughput(Throughput::Elements(total_constraints as u64));
+		group.bench_function(
+			BenchmarkId::new("prove_after_univariate_skip_fused_adaptive_distinct", total_perms),
+			|bench| {
+				bench.iter(|| {
+					black_box(prove_spartan_outer_after_first_round_with_claim_fused_adaptive::<
+						B128,
+						PackedAESBinaryField16x8b,
+					>(
+						&round_traces,
+						first_round_challenge,
+						zerocheck_challenges.clone(),
+						&sumcheck_challenges,
+						folded_claim,
+					))
+				});
+			},
+		);
+
+		group.throughput(Throughput::Elements(total_constraints as u64));
+		group.bench_function(
+			BenchmarkId::new("prove_from_folded_columns_distinct", total_perms),
+			|bench| {
+				bench.iter(|| {
+					black_box(
+						prove_spartan_outer_from_folded_columns_with_claim(
+							columns.clone(),
+							first_round_challenge,
+							zerocheck_challenges.clone(),
+							&sumcheck_challenges,
+							folded_claim,
+						)
+						.unwrap(),
+					)
+				});
+			},
+		);
+
+		group.throughput(Throughput::Elements(total_constraints as u64));
+		group.bench_function(
+			BenchmarkId::new("prove_from_folded_columns_fused_adaptive_distinct", total_perms),
+			|bench| {
+				bench.iter(|| {
+					black_box(prove_spartan_outer_from_folded_columns_with_claim_fused_adaptive(
+						columns.clone(),
+						first_round_challenge,
+						zerocheck_challenges.clone(),
+						&sumcheck_challenges,
+						folded_claim,
+					))
+				});
+			},
+		);
+
+		group.throughput(Throughput::Elements(total_constraints as u64));
+		group.bench_function(
+			BenchmarkId::new("prove_from_folded_columns_packed_distinct", total_perms),
+			|bench| {
+				bench.iter(|| {
+					black_box(
+						prove_spartan_outer_from_folded_columns_with_claim_packed::<
+							B128,
+							OptimalPackedB128,
+						>(
+							columns.clone(),
+							first_round_challenge,
+							zerocheck_challenges.clone(),
+							&sumcheck_challenges,
+							folded_claim,
+						)
+						.unwrap(),
+					)
+				});
+			},
+		);
+
+		group.throughput(Throughput::Elements(total_constraints as u64));
+		group.bench_function(
+			BenchmarkId::new("prove_from_folded_columns_packed_fused_distinct", total_perms),
+			|bench| {
+				bench.iter(|| {
+					black_box(
+						prove_spartan_outer_from_folded_columns_with_claim_packed_fused::<
+							B128,
+							OptimalPackedB128,
+						>(
+							columns.clone(),
+							first_round_challenge,
+							zerocheck_challenges.clone(),
+							&sumcheck_challenges,
+							folded_claim,
+						)
+						.unwrap(),
+					)
+				});
+			},
+		);
+
+		group.throughput(Throughput::Elements(total_constraints as u64));
+		group.bench_function(
+			BenchmarkId::new("prove_from_packed_folded_columns_distinct", total_perms),
+			|bench| {
+				bench.iter(|| {
+					black_box(
+						prove_spartan_outer_from_packed_folded_columns_with_claim::<
+							B128,
+							OptimalPackedB128,
+						>(
+							packed_columns.clone(),
+							first_round_challenge,
+							zerocheck_challenges.clone(),
+							&sumcheck_challenges,
+							folded_claim,
+						)
+						.unwrap(),
+					)
+				});
+			},
+		);
+
+		group.throughput(Throughput::Elements(total_constraints as u64));
+		group.bench_function(
+			BenchmarkId::new("prove_from_packed_folded_columns_fused_distinct", total_perms),
+			|bench| {
+				bench.iter(|| {
+					black_box(
+						prove_spartan_outer_from_packed_folded_columns_with_claim_fused::<
+							B128,
+							OptimalPackedB128,
+						>(
+							packed_columns.clone(),
 							first_round_challenge,
 							zerocheck_challenges.clone(),
 							&sumcheck_challenges,
