@@ -4,7 +4,13 @@
 
 use std::iter;
 
-use binius_field::{BinaryField, Field, PackedField};
+use binius_field::{
+	BinaryField, Field, PackedField, UnderlierWithBitOps, WithUnderlier,
+	linear_transformation::{
+		BytewiseLookupTransformationFactory, LinearTransformationFactory,
+		OutputWrappingTransformationFactory, Transformation,
+	},
+};
 use binius_ip::sumcheck::RoundCoeffs;
 use binius_ip_prover::sumcheck::{
 	Error as SumcheckError, common::SumcheckProver, quadratic_mle::QuadraticMleCheckProver,
@@ -271,13 +277,14 @@ impl<F> FoldedOuterColumns<F>
 where
 	F: Field,
 {
-	fn as_field_buffers(&self) -> [FieldBuffer<F>; 5] {
+	fn into_field_buffers(self) -> [FieldBuffer<F>; 5] {
+		let log_rows = self.log_rows;
 		[
-			FieldBuffer::from_values(&self.p),
-			FieldBuffer::from_values(&self.q),
-			FieldBuffer::from_values(&self.r),
-			FieldBuffer::from_values(&self.next),
-			FieldBuffer::from_values(&self.iota),
+			FieldBuffer::new(log_rows, self.p.into_boxed_slice()),
+			FieldBuffer::new(log_rows, self.q.into_boxed_slice()),
+			FieldBuffer::new(log_rows, self.r.into_boxed_slice()),
+			FieldBuffer::new(log_rows, self.next.into_boxed_slice()),
+			FieldBuffer::new(log_rows, self.iota.into_boxed_slice()),
 		]
 	}
 }
@@ -296,6 +303,71 @@ pub struct SpartanOuterPass<F> {
 
 /// Build the folded outer columns for the remaining chi/iota Spartan sumcheck.
 pub fn folded_outer_columns<FChallenge, P>(
+	round_traces: &[RoundTrace],
+	challenge: FChallenge,
+) -> FoldedOuterColumns<FChallenge>
+where
+	FChallenge: BinaryField + Field + From<P::Scalar> + WithUnderlier,
+	FChallenge::Underlier: UnderlierWithBitOps,
+	P: PackedField,
+	P::Scalar: BinaryField + Field,
+{
+	assert!(!round_traces.is_empty());
+
+	let row_count = round_traces.len() * N_LANES;
+	let padded_row_count = row_count.next_power_of_two();
+	let log_rows = padded_row_count.ilog2() as usize;
+	let input_domain = BinarySubspace::<P::Scalar>::with_dim(crate::bit_ntt::LOG_LANE_BITS + 1)
+		.reduce_dim(crate::bit_ntt::LOG_LANE_BITS)
+		.isomorphic::<FChallenge>();
+	let lagrange_evals = lagrange_evals_scalars(&input_domain, challenge);
+	let transform = OutputWrappingTransformationFactory::new(BytewiseLookupTransformationFactory)
+		.create(&lagrange_evals);
+
+	let mut columns = FoldedOuterColumns {
+		p: Vec::with_capacity(padded_row_count),
+		q: Vec::with_capacity(padded_row_count),
+		r: Vec::with_capacity(padded_row_count),
+		next: Vec::with_capacity(padded_row_count),
+		iota: Vec::with_capacity(padded_row_count),
+		log_rows,
+		row_count,
+	};
+
+	for (trace_idx, round_trace) in round_traces.iter().enumerate() {
+		let round = trace_idx % crate::constants::N_ROUNDS;
+		for lane_idx in 0..N_LANES {
+			let (p_lane, q_lane, r_lane) = CHI_OPERAND_LANES[lane_idx];
+			columns
+				.p
+				.push(transform.transform(&!round_trace.pre_chi[p_lane]));
+			columns
+				.q
+				.push(transform.transform(&round_trace.pre_chi[q_lane]));
+			columns
+				.r
+				.push(transform.transform(&round_trace.pre_chi[r_lane]));
+			columns
+				.next
+				.push(transform.transform(&round_trace.output[lane_idx]));
+			columns.iota.push(transform.transform(&if lane_idx == 0 {
+				ROUND_CONSTANTS[round]
+			} else {
+				0
+			}));
+		}
+	}
+
+	columns.p.resize(padded_row_count, FChallenge::ZERO);
+	columns.q.resize(padded_row_count, FChallenge::ZERO);
+	columns.r.resize(padded_row_count, FChallenge::ZERO);
+	columns.next.resize(padded_row_count, FChallenge::ZERO);
+	columns.iota.resize(padded_row_count, FChallenge::ZERO);
+	columns
+}
+
+#[cfg(test)]
+fn folded_outer_columns_direct<FChallenge, P>(
 	round_traces: &[RoundTrace],
 	challenge: FChallenge,
 ) -> FoldedOuterColumns<FChallenge>
@@ -368,6 +440,7 @@ where
 
 	let eq_weights = eq_ind_partial_eval_scalars(zerocheck_challenges);
 	(0..columns.p.len())
+		.into_par_iter()
 		.map(|i| {
 			(columns.p[i] * columns.q[i] - columns.r[i] - columns.next[i] - columns.iota[i])
 				* eq_weights[i]
@@ -388,7 +461,8 @@ pub fn prove_spartan_outer_after_first_round<FChallenge, P>(
 	sumcheck_challenges: &[FChallenge],
 ) -> Result<SpartanOuterPass<FChallenge>, SumcheckError>
 where
-	FChallenge: BinaryField + Field + From<P::Scalar>,
+	FChallenge: BinaryField + Field + From<P::Scalar> + WithUnderlier,
+	FChallenge::Underlier: UnderlierWithBitOps,
 	P: PackedField,
 	P::Scalar: BinaryField + Field,
 {
@@ -396,16 +470,17 @@ where
 	assert_eq!(zerocheck_challenges.len(), columns.log_rows);
 	assert_eq!(sumcheck_challenges.len(), columns.log_rows);
 
+	let log_rows = columns.log_rows;
 	let folded_claim = folded_outer_claim(&columns, &zerocheck_challenges);
 	let mut prover = QuadraticMleCheckProver::new(
-		columns.as_field_buffers(),
+		columns.into_field_buffers(),
 		|[p, q, r, next, iota]| p * q - r - next - iota,
 		|[p, q, _, _, _]| p * q,
 		zerocheck_challenges.clone(),
 		folded_claim,
 	)?;
 
-	let mut round_messages = Vec::with_capacity(columns.log_rows);
+	let mut round_messages = Vec::with_capacity(log_rows);
 	for &challenge in sumcheck_challenges {
 		let mut coeffs = prover.execute()?;
 		debug_assert_eq!(coeffs.len(), 1);
@@ -624,6 +699,10 @@ mod tests {
 		let first_round_challenge = B128::random(&mut rng);
 
 		let columns = folded_outer_columns::<B128, P>(&round_traces, first_round_challenge);
+		assert_eq!(
+			columns,
+			folded_outer_columns_direct::<B128, P>(&round_traces, first_round_challenge)
+		);
 		assert_eq!(columns.row_count, round_traces.len() * N_LANES);
 		assert!(columns.p.len().is_power_of_two());
 		assert_eq!(columns.p.len(), 1 << columns.log_rows);

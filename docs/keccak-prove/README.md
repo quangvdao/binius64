@@ -40,6 +40,8 @@ Important lessons from the initial implementation:
 
 - The NTT lookup setup matches production BitAnd closely. Lookup precompute has repeatedly measured in the same band as `binius-prover` BitAnd lookup precompute.
 - The first generic `B128`-weighted accumulator was not the right hot-loop shape. Keeping weights packed in the small NTT field made the Keccak accumulator production-shaped and removed the apparent round-message bottleneck.
+- The first folded-column builder was also the wrong hot-loop shape: it directly folded every 64-bit word against all 64 Lagrange values. Switching to the same bytewise lookup transform used by production BitAnd reduced folded-column construction by roughly an order of magnitude on the 128-permutation benchmark.
+- Avoiding an extra scalar-column-to-`FieldBuffer` copy before `QuadraticMleCheckProver` matters. The post-skip outer pass now consumes the folded vectors directly into `FieldBuffer`s, matching the BitAnd reduction shape more closely.
 - Microbenchmarks must report constraints processed per iteration. Earlier raw timings compared very different workloads and overstated the gap to production BitAnd.
 - The current first-round claim path is still only the first sumcheck-message layer, not an end-to-end Keccak proof. It does not yet include folding through subsequent sumcheck rounds, transcript integration, committed input/output boundary openings, or full proof serialization.
 - The post-skip outer pass uses the MLE-check identity from production Binius, so each remaining round message is tied to the current zerocheck coordinate by `(1 - alpha) r(0) + alpha r(1)`, not by the vanilla `r(0) + r(1)` sumcheck identity.
@@ -79,9 +81,9 @@ On 128 Keccak-f permutations, the initial checkpoint measured approximately:
 
 | Step | Median time |
 |---|---:|
-| Folded outer columns | 33.1 ms |
-| Folded outer claim | 3.49 ms |
-| Prove after univariate skip | 68.3 ms |
+| Folded outer columns | 1.54 ms |
+| Folded outer claim | 1.23 ms |
+| Prove after univariate skip | 12.5 ms |
 
 This benchmark includes the remaining degree-2 outer rounds after the bit-axis univariate skip, but still does not include transcript serialization, verifier replay, or boundary-opening reductions.
 

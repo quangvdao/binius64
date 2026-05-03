@@ -63,7 +63,7 @@ The initial post-skip outer benchmark is:
 cargo bench -p binius-keccak-prove --bench keccak_ntt -- keccak_spartan_outer
 ```
 
-On 128 permutations, `prove_after_univariate_skip` measured about 68 ms median. This covers the remaining degree-2 Spartan outer rounds after the bit-axis univariate skip, but not transcript serialization, verifier replay, or boundary-opening reductions.
+On 128 permutations, `prove_after_univariate_skip` measured about 12.5 ms median after switching folded-column construction to the same bytewise lookup transform used by production BitAnd and avoiding an extra scalar-column copy into `FieldBuffer`s. This covers the remaining degree-2 Spartan outer rounds after the bit-axis univariate skip, but not transcript serialization, verifier replay, or boundary-opening reductions.
 
 For broader production comparisons, also run:
 
