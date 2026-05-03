@@ -30,6 +30,14 @@ The local microbenchmarks are:
 cargo bench -p binius-keccak-prove --bench keccak_ntt
 ```
 
+Current implementation chain:
+
+- committed `A`/`D` witness in the locked 32-word block layout;
+- chi/iota Spartan outer in the production BitAnd shape;
+- witness-only chi `P/Q/C` claims lowered through virtual `B` operands into committed `A`/`D`;
+- `D` correctness encoded as degenerate AND rows;
+- production Shift prover/verifier tests for both Keccak schemas.
+
 They track three baselines while the prover path is still being assembled:
 
 - `direct_lagrange_word`: slow, obviously correct evaluation of one 64-bit lane on the shifted upper-half domain.

@@ -14,6 +14,7 @@ pub mod constants;
 pub mod layout;
 pub mod operands;
 pub mod round_message;
+pub mod shift_claims;
 pub mod shift_operands;
 pub mod trace;
 pub mod unrolled;

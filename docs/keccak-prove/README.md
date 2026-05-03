@@ -40,6 +40,10 @@ What has been implemented so far:
 - committed `A`/`D` witness layout helpers for the locked 32-word block layout;
 - committed witness construction from native Keccak traces, including materialized theta correction words and zero padding;
 - Shift-compatible operand helpers for virtual `B` references and `D` correctness relations.
+- production-Shift constraint-system schemas for chi operand pushback and `D` correctness:
+  - chi rows lower `P/Q/C` witness terms to committed `A` and `D` words through virtual `B`;
+  - `D` rows are encoded as degenerate AND constraints `0 * 0 = D_correctness_operand`;
+  - tests run the production Shift prover/verifier on both Keccak schemas.
 
 Important lessons from the initial implementation:
 
@@ -54,6 +58,50 @@ Important lessons from the initial implementation:
 - The post-skip outer pass uses the MLE-check identity from production Binius, so each remaining round message is tied to the current zerocheck coordinate by `(1 - alpha) r(0) + alpha r(1)`, not by the vanilla `r(0) + r(1)` sumcheck identity.
 - The transcripted segment now links the first-round message to the post-skip MLE-check using the verifier's full row point. The packed small-field path is still useful as a fast benchmark/reference, but it is no longer a correctness restriction for transcript replay.
 - Production Shift reduces BitAnd and IntMul claims through a two-phase protocol: a `g * h` sumcheck over bit/shift variables, followed by a bivariate product against the folded committed witness and the monster multilinear. The Keccak linear-layer pushback should be expressed in that shape. A custom direct claim rewrite over the current `(round_trace, lane)` rows would be a different, less production-faithful design.
+
+## Current Proof Chain
+
+The current v0 chain is committed-round-boundary, not the older serial transparent GKR chain.
+
+1. Commit the locked `A`/`D` witness:
+   - every round-boundary `A_r[x,y]`;
+   - every theta correction `D_r[x]`;
+   - no committed pre-chi `B`.
+2. Run the chi/iota Spartan outer segment in the production BitAnd shape:
+
+   ```text
+   P * Q - C = 0
+   ```
+
+   where
+
+   ```text
+   P = 1 + B[x+1,y]
+   Q =     B[x+2,y]
+   C =     B[x,y] + A_next[x,y] + iota
+   ```
+
+3. Convert the final outer evaluations into witness-only Shift claims:
+   - `P_witness = B[x+1,y]`;
+   - `Q_witness = B[x+2,y]`;
+   - `C_witness = B[x,y] + A_next[x,y]`;
+   - the all-one term in `P` is a transparent active-row selector correction;
+   - iota is a transparent correction to the `C` claim.
+4. Use production Shift to reduce the chi operand claims to committed `A`/`D` witness evaluations. Each virtual pre-chi lane is lowered as:
+
+   ```text
+   B_r[pi(x,y)] = rotl_{rho[x,y]}(A_r[x,y] + D_r[x])
+   ```
+
+5. Use production Shift again for `D` correctness, encoded as degenerate AND rows:
+
+   ```text
+   0 * 0 = D_r[x] + sum_y A_r[x-1,y] + sum_y rotl_1(A_r[x+1,y])
+   ```
+
+6. The remaining integration work is to batch these Shift output claims with the boundary claims on `A_0` and `A_24`, then discharge them through the same ring-switching and PCS opening path used after production Shift.
+
+The older serial GKR-style transparent kernel pushback remains useful as a mathematical guardrail, but it is not the hot implementation path now that `A` and `D` are committed and all round rows can be handled in parallel.
 
 ## Locked-in committed witness layout
 
@@ -197,8 +245,7 @@ The production BitAnd full-zerocheck benchmark measured approximately **24.8 ms*
 
 The next implementation milestone is to connect the transcripted chi/iota segment to the locked-in committed-witness path:
 
-1. Lower the folded `P`, `Q`, and `C` chi claims through the virtual `B` operands into committed `A` and `D` words.
-2. Batch the `D` correctness operands as linear, Shift-compatible relations.
-3. Reuse the Shift two-phase reduction to reduce the chi and `D` linear claims to committed witness evaluations.
-4. Integrate boundary openings for committed input/output states through the same ring-switching and PCS opening path used after production Shift.
-5. Add an end-to-end benchmark against the generic `binius-examples` Keccak circuit path, while keeping the current microbenches as regression tripwires.
+1. Wire the transcripted chi/iota outer output directly into `witness_only_chi_evals` and the chi Shift schema.
+2. Batch chi Shift output, `D`-correctness Shift output, and boundary `A_0/A_24` claims into one opening plan.
+3. Integrate that opening plan with the production ring-switching and PCS opening path.
+4. Add an end-to-end benchmark against the generic `binius-examples` Keccak circuit path, while keeping the current microbenches as regression tripwires.

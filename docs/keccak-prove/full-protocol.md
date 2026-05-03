@@ -11,6 +11,21 @@ Earlier sections of this note develop a conservative serial claim-propagation in
 That invariant remains valuable for tests, but it is not the implementation target anymore.
 Now that this work lives inside the Binius64 tree, v0 should be more ambitious: parallel, NTT-backed, and closely derived from the production BitAnd and shift code.
 
+**Current implementation update.** After locking in the committed `A`/`D` layout, the near-term v0
+path uses production Shift directly. The older sections that describe a Keccak-aware transparent
+kernel replacement for Shift should be read as a possible later specialization, not as the current
+implementation plan. The current chain is:
+
+1. commit all round-boundary `A_r[x,y]` words and theta correction `D_r[x]` words;
+2. prove chi/iota with the BitAnd-shaped Spartan outer relation `P * Q - C = 0`;
+3. convert the final outer `P/Q/C` evaluations into witness-only Shift claims by applying the
+   transparent all-one and iota corrections;
+4. run production Shift on the chi operand schema, where every virtual `B` reference is lowered to
+   shifted committed `A` and `D` terms;
+5. run production Shift on degenerate AND rows for `D` correctness;
+6. batch the resulting witness-evaluation claims with the boundary claims and discharge them
+   through the production opening path.
+
 ## 1. Keccak state notation
 
 We use the same lane coordinates as `canvas/keccak-shake-permutation.canvas.tsx`.
@@ -937,19 +952,20 @@ binius64 has the same two-level architecture:
 1. **BitAnd / Spartan-outer:** prove $A \cdot B - C = 0$ with only three operand polynomials.
 2. **Shift Reduction / Spartan-inner:** reduce claims about operand polynomials $A,B,C$ to claims about the underlying witness words.
 
-This note aims for the same shape, but the inner reduction should be Keccak-aware:
+This note aims for the same shape. The current implementation uses production Shift directly:
 
-- binius64 inner handles arbitrary shifted-word constraints.
-- this protocol only needs the fixed Keccak $\theta+\rho+\pi$ linear map, chi row-neighbor selection, and iota constants.
+- binius64 Shift handles arbitrary shifted-word constraints;
+- Keccak chi operand rows instantiate a small fixed subset of that machinery;
+- committed `D` words turn theta into separate linear correctness rows rather than an uncommitted pushback through theta.
 
-This difference should be where the speedup comes from.
+Future specialization can exploit Keccak's fixed maps after the production-faithful chain is benchmarked.
 The outer should stay Spartan-like with a small number of operand polynomials.
 
 ## 12. Remaining decisions before protocol text
 
 - How large the first round segment should be: all 24 rounds in one global outer, or smaller segments such as 4, 6, 8, or 12 rounds.
 - Whether the residual-zero variant should be the default because it recovers BitAnd's upper-half-only first message.
-- How much of generic shift reduction to reuse directly versus copy and specialize for Keccak's fixed maps.
+- How much generic Shift overhead remains visible after the production-faithful path is complete and benchmarked.
 - Whether exact mixed domains for $(t,x,y)$ are worth implementing after padded Boolean domains are measured.
 
 ## 13. Binius-native v0 implementation target
@@ -972,10 +988,10 @@ The target is a Keccak-specific prover that adapts the production BitAnd and shi
    The bit axis should use the byte-table additive-NTT/Four-Russians path immediately.
    This is not a later fast path.
    The implementation should adapt `crates/prover/src/and_reduction/ntt_lookup.rs` and the surrounding BitAnd first-round message code.
-3. **Keccak-aware shift inner.**
-   Reuse the production shift-reduction insight, but remove genericity that Keccak does not need.
-   Keccak has fixed rho offsets, a fixed pi permutation, fixed chi neighbors, and theta's fixed sparse column-parity map.
-   There is no need for a general `KeyCollection` over arbitrary shifted operands in the final hot path.
+3. **Production Shift inner first.**
+   Reuse the production shift-reduction implementation directly for v0.
+   Keccak has fixed rho offsets, a fixed pi permutation, fixed chi neighbors, and committed theta corrections, so every virtual `B` reference can be represented as a small Shift operand over committed `A` and `D` words.
+   A later Keccak-specialized inner may remove some generic `KeyCollection` overhead, but that should be an optimization after the production-faithful chain is complete and benchmarked.
 4. **Parallel or segmented-parallel proving.**
    The first prover should batch across many Keccak permutations and should aim to batch across rounds as much as the claim interface permits.
    A segmented mode is acceptable if one global 24-round outer forces too much boundary machinery too early.
@@ -995,10 +1011,11 @@ crates/keccak-prove/
     trace.rs
     operands.rs
     bit_ntt.rs
-    outer.rs
-    linear_inner.rs
-    segment.rs
-    prove.rs
+    round_message.rs
+    layout.rs
+    witness.rs
+    shift_operands.rs
+    shift_claims.rs
 ```
 
 `constants.rs` owns the FIPS constants, rho offsets, lane-index helpers, and padded-domain constants.
@@ -1012,19 +1029,18 @@ It should support padded lane rows and validity selectors without materializing 
 `bit_ntt.rs` owns the Keccak-adapted bit-axis first-round logic.
 It should start by copying the shape of the production BitAnd NTT lookup code, then generalize only where Keccak requires row weights, round/lane selectors, or iota residual terms.
 
-`outer.rs` owns the Spartan/BitAnd-style outer relation over the chosen segment domain.
+`round_message.rs` owns the Spartan/BitAnd-style outer relation over the chosen segment domain.
 It should be written so the segment axis can be one round, several rounds, or all 24 rounds.
 
-`linear_inner.rs` owns the Keccak-aware replacement for generic shift reduction:
+`layout.rs` and `witness.rs` own the committed `A`/`D` witness layout and construction.
 
-- chi-neighbor transpose on lanes;
-- pi inverse lane permutation;
-- rho inverse cyclic shifts on 64-entry bit kernels;
-- theta transpose via column-kernel sums and one-bit kernel rotations.
+`shift_operands.rs` owns virtual `B` lowering and `D` correctness operands.
 
-`segment.rs` owns the segment boundary object and the handoff between outer and inner reductions.
+`shift_claims.rs` owns the production Shift schemas for chi operand pushback and `D` correctness.
 
-`prove.rs` owns the high-level prover/verifier entrypoints and transcript order.
+Future `segment.rs` should own the segment boundary object and the handoff between outer and Shift reductions.
+
+Future `prove.rs` should own the high-level prover/verifier entrypoints and transcript order.
 
 ### Residual-zero default
 
@@ -1042,7 +1058,7 @@ If this makes the all-24-round global form awkward, use segmented proving:
 
 - commit or otherwise bind segment boundaries;
 - run the residual-zero BitAnd-style outer inside each segment;
-- use the Keccak-aware linear inner to avoid generic shift machinery inside the segment.
+- use the committed `A`/`D` plus production-Shift path inside the segment.
 
 ### Reuse points in Binius64
 

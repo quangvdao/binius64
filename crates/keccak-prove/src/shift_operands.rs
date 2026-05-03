@@ -26,11 +26,24 @@ pub fn value_index(index: usize) -> ValueIndex {
 	ValueIndex(index as u32)
 }
 
+/// Convert a committed witness word index plus a value-vector base offset to a production
+/// `ValueIndex`.
+#[inline]
+pub fn value_index_at(base_index: usize, index: usize) -> ValueIndex {
+	value_index(base_index + index)
+}
+
 /// Return a shifted term for rotating a committed word left by `amount`.
 #[inline]
 pub fn rotl_term(index: usize, amount: u32) -> ShiftedValueIndex {
+	rotl_term_at(0, index, amount)
+}
+
+/// Return a shifted term for rotating a base-offset committed word left by `amount`.
+#[inline]
+pub fn rotl_term_at(base_index: usize, index: usize, amount: u32) -> ShiftedValueIndex {
 	let amount = (amount % 64) as usize;
-	let index = value_index(index);
+	let index = value_index_at(base_index, index);
 	if amount == 0 {
 		ShiftedValueIndex::plain(index)
 	} else {
@@ -49,14 +62,24 @@ pub fn rotl_term(index: usize, amount: u32) -> ShiftedValueIndex {
 /// Since `D` is committed and `B` is not, this lowers every virtual `B` reference to two shifted
 /// committed terms.
 pub fn virtual_b_operand(permutation: usize, round: usize, b_lane: usize) -> Operand {
+	virtual_b_operand_at(0, permutation, round, b_lane)
+}
+
+/// Return the virtual `B_r[b_lane]` operand lowered at a base offset inside the value vector.
+pub fn virtual_b_operand_at(
+	base_index: usize,
+	permutation: usize,
+	round: usize,
+	b_lane: usize,
+) -> Operand {
 	assert!(b_lane < N_LANES);
 	let source_lane = RHO_PI_PREIMAGE[b_lane];
 	let source_x = lane_x(source_lane);
 	let rho = RHO_OFFSETS[source_lane];
 
 	vec![
-		rotl_term(layout::a_index(permutation, round, source_lane), rho),
-		rotl_term(layout::d_index(permutation, round, source_x), rho),
+		rotl_term_at(base_index, layout::a_index(permutation, round, source_lane), rho),
+		rotl_term_at(base_index, layout::d_index(permutation, round, source_x), rho),
 	]
 }
 
@@ -68,21 +91,37 @@ pub fn virtual_b_operand(permutation: usize, round: usize, b_lane: usize) -> Ope
 /// D_r[x] + sum_y A_r[x-1,y] + sum_y rotl_1(A_r[x+1,y]) = 0
 /// ```
 pub fn d_correctness_operand(permutation: usize, round: usize, x: usize) -> Operand {
+	d_correctness_operand_at(0, permutation, round, x)
+}
+
+/// Return the `D_r[x]` correctness operand at a base offset inside the value vector.
+pub fn d_correctness_operand_at(
+	base_index: usize,
+	permutation: usize,
+	round: usize,
+	x: usize,
+) -> Operand {
 	assert!(x < layout::D_WORDS_PER_BLOCK);
 	let left_x = (x + 4) % 5;
 	let right_x = (x + 1) % 5;
 
 	let mut operand = Vec::with_capacity(11);
-	operand.push(ShiftedValueIndex::plain(value_index(layout::d_index(permutation, round, x))));
+	operand.push(ShiftedValueIndex::plain(value_index_at(
+		base_index,
+		layout::d_index(permutation, round, x),
+	)));
 	for y in 0..5 {
-		operand.push(ShiftedValueIndex::plain(value_index(layout::a_index(
-			permutation,
-			round,
-			left_x + 5 * y,
-		))));
+		operand.push(ShiftedValueIndex::plain(value_index_at(
+			base_index,
+			layout::a_index(permutation, round, left_x + 5 * y),
+		)));
 	}
 	for y in 0..5 {
-		operand.push(rotl_term(layout::a_index(permutation, round, right_x + 5 * y), 1));
+		operand.push(rotl_term_at(
+			base_index,
+			layout::a_index(permutation, round, right_x + 5 * y),
+			1,
+		));
 	}
 	operand
 }
