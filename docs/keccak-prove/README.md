@@ -42,6 +42,8 @@ Important lessons from the initial implementation:
 - The first generic `B128`-weighted accumulator was not the right hot-loop shape. Keeping weights packed in the small NTT field made the Keccak accumulator production-shaped and removed the apparent round-message bottleneck.
 - The first folded-column builder was also the wrong hot-loop shape: it directly folded every 64-bit word against all 64 Lagrange values. Switching to the same bytewise lookup transform used by production BitAnd reduced folded-column construction by roughly an order of magnitude on the 128-permutation benchmark.
 - Avoiding an extra scalar-column-to-`FieldBuffer` copy before `QuadraticMleCheckProver` matters. The post-skip outer pass now consumes the folded vectors directly into `FieldBuffer`s, matching the BitAnd reduction shape more closely.
+- The post-skip outer pass should use the same three-column shape as production BitAnd. Combining `R + next + iota` into a single folded `C` column lets the quadratic MLE-check prove `P * Q - C`, rather than carrying five columns through every remaining round.
+- The folded-column builder should be parallel like production word folding. Preallocating the padded columns and filling `(round_trace, lane)` chunks with Rayon removed the serial fold bottleneck.
 - Microbenchmarks must report constraints processed per iteration. Earlier raw timings compared very different workloads and overstated the gap to production BitAnd.
 - The current first-round claim path is still only the first sumcheck-message layer, not an end-to-end Keccak proof. It does not yet include folding through subsequent sumcheck rounds, transcript integration, committed input/output boundary openings, or full proof serialization.
 - The post-skip outer pass uses the MLE-check identity from production Binius, so each remaining round message is tied to the current zerocheck coordinate by `(1 - alpha) r(0) + alpha r(1)`, not by the vanilla `r(0) + r(1)` sumcheck identity.
@@ -81,9 +83,9 @@ On 128 Keccak-f permutations, the initial checkpoint measured approximately:
 
 | Step | Median time |
 |---|---:|
-| Folded outer columns | 1.54 ms |
-| Folded outer claim | 1.23 ms |
-| Prove after univariate skip | 12.5 ms |
+| Folded outer columns | 0.412 ms |
+| Folded outer claim | 0.586 ms |
+| Prove after univariate skip | 8.16 ms |
 
 This benchmark includes the remaining degree-2 outer rounds after the bit-axis univariate skip, but still does not include transcript serialization, verifier replay, or boundary-opening reductions.
 
@@ -108,10 +110,11 @@ path measured approximately:
 | 12,288 | 179 ms |
 | 16,384 | 262 ms |
 | 24,576 | 366 ms |
-| 28,672 | 488 ms |
-| 32,768 | 527 ms |
+| 32,768 | 252 ms |
+| 55,924 | 264 ms |
+| 65,536 | 524 ms |
 
-Thus the first measured size crossing roughly 500 ms by median for the current post-skip outer pass is **32,768 Keccak-f permutations**.
+Thus the first measured size crossing roughly 500 ms by median for the current post-skip outer pass is **65,536 Keccak-f permutations**.
 
 For a closer production BitAnd comparison:
 
@@ -119,7 +122,7 @@ For a closer production BitAnd comparison:
 cargo bench -p binius-prover --bench and_reduction -- "full zerocheck"
 ```
 
-The production BitAnd full-zerocheck benchmark measured approximately **24.8 ms** at `2^27` rows, reported as about **84.5M word constraints/s**. The Keccak post-skip outer pass at 32,768 permutations processes `32,768 * 24 * 25 = 19.66M` folded lane constraints in about **527 ms**, or about **37.3M constraints/s**. This says the Keccak path is now in the same broad production-shaped regime, but still roughly **2.3x slower per folded constraint** on this machine. It also still excludes transcript serialization, verifier replay, linear-layer pushback, and boundary openings.
+The production BitAnd full-zerocheck benchmark measured approximately **24.8 ms** at `2^27` rows, reported as about **84.5M word constraints/s**. The Keccak post-skip outer pass at 55,924 permutations processes almost exactly one full padded row domain, `55,924 * 24 * 25 = 33.55M` folded lane constraints, in about **264 ms**, or about **126.9M constraints/s**. Just after the next padding cliff, 65,536 permutations processes `39.32M` folded lane constraints in about **524 ms**, or about **75.1M constraints/s**. This says the hot path is now close to production BitAnd; the remaining visible cliff is largely the padded Boolean row domain. It still excludes transcript serialization, verifier replay, linear-layer pushback, and boundary openings.
 
 ## Next steps
 

@@ -9,7 +9,7 @@ use binius_keccak_prove::{
 	round_message::{
 		folded_outer_claim, folded_outer_columns, par_first_round_claim_small_weights,
 		par_upper_half_round_message, par_upper_half_round_message_small_weights,
-		prove_spartan_outer_after_first_round, upper_half_round_message,
+		prove_spartan_outer_after_first_round_with_claim, upper_half_round_message,
 		upper_half_round_message_small_weights,
 	},
 	trace::{PermutationTrace, RoundTrace, State},
@@ -263,6 +263,7 @@ fn bench_keccak_spartan_outer(c: &mut Criterion) {
 	let zerocheck_challenges: Vec<_> = (0..columns.log_rows)
 		.map(|_| B128::random(&mut rng))
 		.collect();
+	let folded_claim = folded_outer_claim(&columns, &zerocheck_challenges);
 	let sumcheck_challenges: Vec<_> = (0..columns.log_rows)
 		.map(|_| B128::random(&mut rng))
 		.collect();
@@ -290,11 +291,15 @@ fn bench_keccak_spartan_outer(c: &mut Criterion) {
 	group.bench_function("prove_after_univariate_skip/128_perms", |bench| {
 		bench.iter(|| {
 			black_box(
-				prove_spartan_outer_after_first_round::<B128, PackedAESBinaryField16x8b>(
+				prove_spartan_outer_after_first_round_with_claim::<
+					B128,
+					PackedAESBinaryField16x8b,
+				>(
 					&round_traces,
 					first_round_challenge,
 					zerocheck_challenges.clone(),
 					&sumcheck_challenges,
+					folded_claim,
 				)
 				.unwrap(),
 			)
@@ -308,7 +313,7 @@ fn bench_keccak_spartan_outer_scale(c: &mut Criterion) {
 	group.measurement_time(Duration::from_secs(6));
 
 	for total_perms in [
-		128, 256, 512, 1024, 2048, 4096, 8192, 12288, 16384, 24576, 28672, 32768,
+		128, 256, 512, 1024, 2048, 4096, 8192, 12288, 16384, 24576, 28672, 32768, 55924, 65536,
 	] {
 		let mut rng = StdRng::seed_from_u64(19 + total_perms as u64);
 		let mut round_traces = Vec::with_capacity(total_perms * KECCAK_ROUNDS_PER_PERM);
@@ -320,6 +325,11 @@ fn bench_keccak_spartan_outer_scale(c: &mut Criterion) {
 			.next_power_of_two()
 			.ilog2() as usize;
 		let zerocheck_challenges: Vec<_> = (0..log_rows).map(|_| B128::random(&mut rng)).collect();
+		let columns = folded_outer_columns::<B128, PackedAESBinaryField16x8b>(
+			&round_traces,
+			first_round_challenge,
+		);
+		let folded_claim = folded_outer_claim(&columns, &zerocheck_challenges);
 		let sumcheck_challenges: Vec<_> = (0..log_rows).map(|_| B128::random(&mut rng)).collect();
 		let total_constraints = total_perms * KECCAK_ROUNDS_PER_PERM * KECCAK_LANES_PER_ROUND;
 
@@ -329,11 +339,15 @@ fn bench_keccak_spartan_outer_scale(c: &mut Criterion) {
 			|bench| {
 				bench.iter(|| {
 					black_box(
-						prove_spartan_outer_after_first_round::<B128, PackedAESBinaryField16x8b>(
+						prove_spartan_outer_after_first_round_with_claim::<
+							B128,
+							PackedAESBinaryField16x8b,
+						>(
 							&round_traces,
 							first_round_challenge,
 							zerocheck_challenges.clone(),
 							&sumcheck_challenges,
+							folded_claim,
 						)
 						.unwrap(),
 					)

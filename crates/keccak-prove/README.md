@@ -39,7 +39,7 @@ They track three baselines while the prover path is still being assembled:
 - `first_round_claim_small_par`: the production-shaped first-round flow, including upper-half accumulation, full 128-point message construction with zero base-domain values, and extrapolation at a verifier challenge.
 - `keccak_first_round_claim_scale`: a distinct-data batch sweep up to 196,608 effective permutations with Criterion `sample_size(10)` to track where first-round work crosses roughly 500 ms.
 - `keccak_spartan_outer`: the folded-column construction, folded outer claim, and remaining post-skip Spartan outer rounds for 128 permutations.
-- `keccak_spartan_outer_scale`: a distinct-data batch sweep up to 32,768 permutations to track where the post-skip outer pass crosses roughly 500 ms.
+- `keccak_spartan_outer_scale`: a distinct-data batch sweep up to 65,536 permutations to track where the post-skip outer pass crosses roughly 500 ms.
 - `production_bitand_lookup_precompute`: the existing Binius64 BitAnd lookup setup, using the same domain shape.
 - `production_bitand_reference`: the existing Binius64 BitAnd univariate round-message hot path.
 
@@ -64,7 +64,7 @@ The initial post-skip outer benchmark is:
 cargo bench -p binius-keccak-prove --bench keccak_ntt -- keccak_spartan_outer
 ```
 
-On 128 permutations, `prove_after_univariate_skip` measured about 12.5 ms median after switching folded-column construction to the same bytewise lookup transform used by production BitAnd and avoiding an extra scalar-column copy into `FieldBuffer`s. This covers the remaining degree-2 Spartan outer rounds after the bit-axis univariate skip, but not transcript serialization, verifier replay, or boundary-opening reductions.
+On 128 permutations, `prove_after_univariate_skip` measured about 8.16 ms median after switching folded-column construction to the same bytewise lookup transform used by production BitAnd, combining `R + next + iota` into the BitAnd-shaped third column, filling folded columns in parallel, and avoiding an extra scalar-column copy into `FieldBuffer`s. This covers the remaining degree-2 Spartan outer rounds after the bit-axis univariate skip, but not transcript serialization, verifier replay, or boundary-opening reductions.
 
 The post-skip outer scale benchmark is:
 
@@ -72,7 +72,7 @@ The post-skip outer scale benchmark is:
 cargo bench -p binius-keccak-prove --bench keccak_ntt -- keccak_spartan_outer_scale
 ```
 
-On the initial implementation machine, `prove_after_univariate_skip_distinct` crossed roughly 500 ms by median at 32,768 Keccak-f permutations. The closest measured lower point was 28,672 permutations at about 488 ms median.
+On the initial implementation machine, `prove_after_univariate_skip_distinct` crossed roughly 500 ms by median at 65,536 Keccak-f permutations. A well-packed point just below the previous padded-row cliff, 55,924 permutations, measured about 264 ms median.
 
 For production BitAnd comparison:
 
@@ -80,7 +80,7 @@ For production BitAnd comparison:
 cargo bench -p binius-prover --bench and_reduction -- "full zerocheck"
 ```
 
-On the same machine, production BitAnd full zerocheck measured about 24.8 ms at `2^27` rows, or about 84.5M word constraints/s. The Keccak post-skip outer pass at 32,768 permutations measured about 527 ms for 19.66M folded lane constraints, or about 37.3M constraints/s.
+On the same machine, production BitAnd full zerocheck measured about 24.8 ms at `2^27` rows, or about 84.5M word constraints/s. The Keccak post-skip outer pass measured about 126.9M folded lane constraints/s at 55,924 permutations and about 75.1M folded lane constraints/s at 65,536 permutations after the next padding cliff.
 
 For broader production comparisons, also run:
 
