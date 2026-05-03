@@ -18,4 +18,29 @@ The first implementation milestone is a residual-zero NTT test for one Keccak ro
 cargo test -p binius-keccak-prove keccak_bitand_residual_matches_native_round
 ```
 
-After that, wire one segment into the Binius transcript and sumcheck machinery, then benchmark against `binius_circuits` Keccak.
+Run the full crate sanity suite with:
+
+```text
+cargo test -p binius-keccak-prove
+```
+
+The local microbenchmarks are:
+
+```text
+cargo bench -p binius-keccak-prove --bench keccak_ntt
+```
+
+They track three baselines while the prover path is still being assembled:
+
+- `direct_lagrange_word`: slow, obviously correct evaluation of one 64-bit lane on the shifted upper-half domain.
+- `byte_lookup_word` and `keccak_lookup_precompute`: the Keccak-local byte NTT lookup path.
+- `production_bitand_lookup_precompute`: the existing Binius64 BitAnd lookup setup, using the same domain shape.
+
+For broader production comparisons, also run:
+
+```text
+cargo bench -p binius-prover --bench and_reduction
+cargo bench -p binius-examples --bench keccak
+```
+
+The first is the optimized BitAnd outer-reduction path we are adapting. The second is the current generic Keccak circuit proving baseline.
