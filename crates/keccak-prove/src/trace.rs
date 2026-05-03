@@ -4,7 +4,13 @@
 
 use std::array;
 
-use crate::constants::{N_LANES, N_ROUNDS, RHO_OFFSETS, ROUND_CONSTANTS, lane};
+use crate::{
+	constants::{N_LANES, N_ROUNDS},
+	unrolled,
+};
+
+#[cfg(test)]
+use crate::constants::{RHO_OFFSETS, ROUND_CONSTANTS, lane};
 
 /// One Keccak-f[1600] state represented as 25 little-endian 64-bit lanes.
 pub type State = [u64; N_LANES];
@@ -64,20 +70,31 @@ pub fn round(input: State, round: usize) -> State {
 
 /// Apply theta followed by rho+pi, returning the pre-chi lanes.
 pub fn theta_rho_pi(input: State) -> State {
-	let mut state = input;
-	theta(&mut state);
-	rho_pi(&mut state);
-	state
+	unrolled::theta_rho_pi(input)
 }
 
 /// Apply chi followed by iota to a pre-chi state.
-pub fn chi_iota(mut pre_chi: State, round: usize) -> State {
+pub fn chi_iota(pre_chi: State, round: usize) -> State {
+	unrolled::chi_iota(pre_chi, round)
+}
+
+#[cfg(test)]
+fn theta_rho_pi_reference(input: State) -> State {
+	let mut state = input;
+	theta_reference(&mut state);
+	rho_pi_reference(&mut state);
+	state
+}
+
+#[cfg(test)]
+fn chi_iota_reference(mut pre_chi: State, round: usize) -> State {
 	chi(&mut pre_chi);
 	pre_chi[0] ^= ROUND_CONSTANTS[round];
 	pre_chi
 }
 
-fn theta(state: &mut State) {
+#[cfg(test)]
+fn theta_reference(state: &mut State) {
 	let c = array::from_fn::<_, 5, _>(|x| {
 		state[lane(x, 0)]
 			^ state[lane(x, 1)]
@@ -101,7 +118,8 @@ fn theta(state: &mut State) {
 	}
 }
 
-fn rho_pi(state: &mut State) {
+#[cfg(test)]
+fn rho_pi_reference(state: &mut State) {
 	let mut output = [0u64; N_LANES];
 	for y in 0..5 {
 		for x in 0..5 {
@@ -112,6 +130,7 @@ fn rho_pi(state: &mut State) {
 	*state = output;
 }
 
+#[cfg(test)]
 fn chi(state: &mut State) {
 	for y in 0..5 {
 		let a0 = state[lane(0, y)];
@@ -147,10 +166,23 @@ mod tests {
 				round(trace.rounds[round_idx].input, round_idx)
 			);
 			if round_idx + 1 < N_ROUNDS {
-				assert_eq!(
-					trace.rounds[round_idx].output,
-					trace.rounds[round_idx + 1].input
-				);
+				assert_eq!(trace.rounds[round_idx].output, trace.rounds[round_idx + 1].input);
+			}
+		}
+	}
+
+	#[test]
+	fn unrolled_round_steps_match_reference() {
+		let mut rng = StdRng::seed_from_u64(2);
+
+		for _ in 0..32 {
+			let input = rng.random::<State>();
+			let pre_chi = theta_rho_pi(input);
+
+			assert_eq!(pre_chi, theta_rho_pi_reference(input));
+			for round_idx in 0..N_ROUNDS {
+				assert_eq!(chi_iota(pre_chi, round_idx), chi_iota_reference(pre_chi, round_idx));
+				assert_eq!(round(input, round_idx), chi_iota_reference(pre_chi, round_idx));
 			}
 		}
 	}

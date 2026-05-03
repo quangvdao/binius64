@@ -3,9 +3,13 @@
 //! BitAnd-style Keccak chi operands and residuals.
 
 use crate::{
-	constants::{N_LANES, ROUND_CONSTANTS, lane},
+	constants::{ROUND_CONSTANTS, lane},
 	trace::State,
+	unrolled,
 };
+
+#[cfg(test)]
+use crate::constants::N_LANES;
 
 /// Virtual chi operands for one valid lane position.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,7 +44,13 @@ pub fn chi_operands(pre_chi: &State, x: usize, y: usize) -> ChiOperands {
 /// over the base bit domain. In characteristic two this is
 /// `(p & q) ^ r ^ next ^ iota`.
 #[inline]
-pub fn chi_iota_residual_word(pre_chi: &State, next: &State, round: usize, x: usize, y: usize) -> u64 {
+pub fn chi_iota_residual_word(
+	pre_chi: &State,
+	next: &State,
+	round: usize,
+	x: usize,
+	y: usize,
+) -> u64 {
 	let ChiOperands { p, q, r } = chi_operands(pre_chi, x, y);
 	let iota = if x == 0 && y == 0 {
 		ROUND_CONSTANTS[round]
@@ -53,6 +63,11 @@ pub fn chi_iota_residual_word(pre_chi: &State, next: &State, round: usize, x: us
 
 /// Compute all 25 residual words for one Keccak round.
 pub fn chi_iota_residual_words(pre_chi: &State, next: &State, round: usize) -> State {
+	unrolled::chi_iota_residual_words(pre_chi, next, round)
+}
+
+#[cfg(test)]
+fn chi_iota_residual_words_reference(pre_chi: &State, next: &State, round: usize) -> State {
 	let mut residual = [0u64; N_LANES];
 	for y in 0..5 {
 		for x in 0..5 {
@@ -82,13 +97,18 @@ mod tests {
 
 			for round in 0..N_ROUNDS {
 				let round_trace = trace.rounds[round];
-				let residual = chi_iota_residual_words(
-					&round_trace.pre_chi,
-					&round_trace.output,
-					round,
-				);
+				let residual =
+					chi_iota_residual_words(&round_trace.pre_chi, &round_trace.output, round);
 
 				assert_eq!(residual, [0u64; N_LANES], "round {round}");
+				assert_eq!(
+					residual,
+					chi_iota_residual_words_reference(
+						&round_trace.pre_chi,
+						&round_trace.output,
+						round
+					)
+				);
 			}
 		}
 	}
