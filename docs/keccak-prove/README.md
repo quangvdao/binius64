@@ -87,6 +87,40 @@ On 128 Keccak-f permutations, the initial checkpoint measured approximately:
 
 This benchmark includes the remaining degree-2 outer rounds after the bit-axis univariate skip, but still does not include transcript serialization, verifier replay, or boundary-opening reductions.
 
+The post-skip outer pass scale benchmark is:
+
+```text
+cargo bench -p binius-keccak-prove --bench keccak_ntt -- keccak_spartan_outer_scale
+```
+
+With Criterion `sample_size(10)`, the current `prove_after_univariate_skip_distinct`
+path measured approximately:
+
+| Keccak-f permutations | Median time |
+|---:|---:|
+| 128 | 11.5 ms |
+| 256 | 18.6 ms |
+| 512 | 19.4 ms |
+| 1,024 | 28.5 ms |
+| 2,048 | 44.9 ms |
+| 4,096 | 85.0 ms |
+| 8,192 | 159 ms |
+| 12,288 | 179 ms |
+| 16,384 | 262 ms |
+| 24,576 | 366 ms |
+| 28,672 | 488 ms |
+| 32,768 | 527 ms |
+
+Thus the first measured size crossing roughly 500 ms by median for the current post-skip outer pass is **32,768 Keccak-f permutations**.
+
+For a closer production BitAnd comparison:
+
+```text
+cargo bench -p binius-prover --bench and_reduction -- "full zerocheck"
+```
+
+The production BitAnd full-zerocheck benchmark measured approximately **24.8 ms** at `2^27` rows, reported as about **84.5M word constraints/s**. The Keccak post-skip outer pass at 32,768 permutations processes `32,768 * 24 * 25 = 19.66M` folded lane constraints in about **527 ms**, or about **37.3M constraints/s**. This says the Keccak path is now in the same broad production-shaped regime, but still roughly **2.3x slower per folded constraint** on this machine. It also still excludes transcript serialization, verifier replay, linear-layer pushback, and boundary openings.
+
 ## Next steps
 
 The next implementation milestone is to turn the current prover-driven pass into a transcripted, verifier-replayed segment:

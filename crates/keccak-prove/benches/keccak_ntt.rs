@@ -302,6 +302,47 @@ fn bench_keccak_spartan_outer(c: &mut Criterion) {
 	});
 }
 
+fn bench_keccak_spartan_outer_scale(c: &mut Criterion) {
+	let mut group = c.benchmark_group("keccak_spartan_outer_scale");
+	group.sample_size(10);
+	group.measurement_time(Duration::from_secs(6));
+
+	for total_perms in [
+		128, 256, 512, 1024, 2048, 4096, 8192, 12288, 16384, 24576, 28672, 32768,
+	] {
+		let mut rng = StdRng::seed_from_u64(19 + total_perms as u64);
+		let mut round_traces = Vec::with_capacity(total_perms * KECCAK_ROUNDS_PER_PERM);
+		for _ in 0..total_perms {
+			round_traces.extend(PermutationTrace::new(rng.random::<State>()).rounds);
+		}
+		let first_round_challenge = B128::random(&mut rng);
+		let log_rows = (round_traces.len() * KECCAK_LANES_PER_ROUND)
+			.next_power_of_two()
+			.ilog2() as usize;
+		let zerocheck_challenges: Vec<_> = (0..log_rows).map(|_| B128::random(&mut rng)).collect();
+		let sumcheck_challenges: Vec<_> = (0..log_rows).map(|_| B128::random(&mut rng)).collect();
+		let total_constraints = total_perms * KECCAK_ROUNDS_PER_PERM * KECCAK_LANES_PER_ROUND;
+
+		group.throughput(Throughput::Elements(total_constraints as u64));
+		group.bench_function(
+			BenchmarkId::new("prove_after_univariate_skip_distinct", total_perms),
+			|bench| {
+				bench.iter(|| {
+					black_box(
+						prove_spartan_outer_after_first_round::<B128, PackedAESBinaryField16x8b>(
+							&round_traces,
+							first_round_challenge,
+							zerocheck_challenges.clone(),
+							&sumcheck_challenges,
+						)
+						.unwrap(),
+					)
+				});
+			},
+		);
+	}
+}
+
 fn scale_chunks(total_perms: usize) -> Vec<(Vec<RoundTrace>, Vec<AESTowerField8b>)> {
 	let mut remaining_perms = total_perms;
 	let mut chunk_idx = 0;
@@ -397,6 +438,7 @@ criterion_group!(
 	bench_keccak_residuals,
 	bench_keccak_first_round_claim_scale,
 	bench_keccak_spartan_outer,
+	bench_keccak_spartan_outer_scale,
 	bench_production_bitand_round_message
 );
 criterion_main!(keccak_ntt);
