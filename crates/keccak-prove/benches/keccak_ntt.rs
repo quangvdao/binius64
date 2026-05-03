@@ -1,15 +1,15 @@
 // Copyright 2026 The Binius Developers
 
-use std::{env, hint::black_box, time::Duration};
+use std::{env, hint::black_box, thread, time::Duration};
 
 use binius_core::{constraint_system::Operand, word::Word};
 use binius_field::{AESTowerField8b, Field, PackedAESBinaryField16x8b, Random};
 use binius_keccak_prove::{
 	bit_ntt::{NttLookup, upper_half_domains, upper_half_residual_evals},
 	round_message::{
-		folded_outer_claim, folded_outer_columns, pack_folded_outer_columns,
-		par_first_round_claim_small_weights, par_upper_half_round_message,
-		par_upper_half_round_message_small_weights,
+		PackedFoldedOuterColumns, folded_outer_claim, folded_outer_columns,
+		pack_folded_outer_columns, par_first_round_claim_small_weights,
+		par_upper_half_round_message, par_upper_half_round_message_small_weights,
 		prove_spartan_outer_after_first_round_with_claim,
 		prove_spartan_outer_after_first_round_with_claim_fused_adaptive,
 		prove_spartan_outer_from_folded_columns_with_claim,
@@ -52,6 +52,15 @@ const KECCAK_BENCH_PERMS: usize = 128;
 const KECCAK_ROUNDS_PER_PERM: usize = 24;
 const KECCAK_LANES_PER_ROUND: usize = binius_keccak_prove::constants::N_LANES;
 const KECCAK_SCALE_CHUNK_PERMS: usize = 65_536;
+
+#[derive(Clone)]
+struct SpartanOuterScaleInstance {
+	packed_columns: PackedFoldedOuterColumns<OptimalPackedB128>,
+	first_round_challenge: B128,
+	zerocheck_challenges: Vec<B128>,
+	sumcheck_challenges: Vec<B128>,
+	folded_claim: B128,
+}
 
 fn eval_word_direct(
 	input_domain: &BinarySubspace<AESTowerField8b>,
@@ -720,7 +729,131 @@ fn bench_keccak_spartan_outer_scale(c: &mut Criterion) {
 				});
 			},
 		);
+
+		if let Some(chunk_perms) = spartan_outer_coarse_chunk_perms()
+			&& total_perms > chunk_perms
+		{
+			let instances = spartan_outer_coarse_instances(total_perms, chunk_perms);
+			let jobs = spartan_outer_coarse_jobs().min(instances.len()).max(1);
+			group.throughput(Throughput::Elements(total_constraints as u64));
+			group.bench_function(
+				BenchmarkId::new(
+					format!(
+						"prove_packed_persistent_fused_coarse_{}_jobs_{}_per_chunk",
+						jobs, chunk_perms
+					),
+					total_perms,
+				),
+				|bench| {
+					bench.iter(|| black_box(prove_coarse_persistent_batch(&instances, jobs)));
+				},
+			);
+		}
 	}
+}
+
+fn spartan_outer_coarse_chunk_perms() -> Option<usize> {
+	env::var("KECCAK_SPARTAN_OUTER_COARSE_CHUNK_PERMS")
+		.ok()
+		.map(|value| {
+			value
+				.parse::<usize>()
+				.expect("KECCAK_SPARTAN_OUTER_COARSE_CHUNK_PERMS must be a usize")
+		})
+}
+
+fn spartan_outer_coarse_jobs() -> usize {
+	env::var("KECCAK_SPARTAN_OUTER_COARSE_JOBS")
+		.ok()
+		.and_then(|value| value.parse().ok())
+		.or_else(|| thread::available_parallelism().ok().map(usize::from))
+		.unwrap_or(1)
+}
+
+fn spartan_outer_coarse_instances(
+	total_perms: usize,
+	chunk_perms: usize,
+) -> Vec<SpartanOuterScaleInstance> {
+	let mut remaining_perms = total_perms;
+	let mut chunk_idx = 0;
+	let mut instances = Vec::new();
+
+	while remaining_perms > 0 {
+		let current_chunk_perms = remaining_perms.min(chunk_perms);
+		let mut rng = StdRng::seed_from_u64(
+			29 + total_perms as u64 * 17 + chunk_perms as u64 * 31 + chunk_idx as u64,
+		);
+		let mut round_traces = Vec::with_capacity(current_chunk_perms * KECCAK_ROUNDS_PER_PERM);
+		for _ in 0..current_chunk_perms {
+			round_traces.extend(PermutationTrace::new(rng.random::<State>()).rounds);
+		}
+		let first_round_challenge = B128::random(&mut rng);
+		let columns = folded_outer_columns::<B128, PackedAESBinaryField16x8b>(
+			&round_traces,
+			first_round_challenge,
+		);
+		let zerocheck_challenges: Vec<_> = (0..columns.log_rows)
+			.map(|_| B128::random(&mut rng))
+			.collect();
+		let folded_claim = folded_outer_claim(&columns, &zerocheck_challenges);
+		let sumcheck_challenges: Vec<_> = (0..columns.log_rows)
+			.map(|_| B128::random(&mut rng))
+			.collect();
+		let packed_columns = pack_folded_outer_columns::<B128, OptimalPackedB128>(columns);
+		instances.push(SpartanOuterScaleInstance {
+			packed_columns,
+			first_round_challenge,
+			zerocheck_challenges,
+			sumcheck_challenges,
+			folded_claim,
+		});
+
+		remaining_perms -= current_chunk_perms;
+		chunk_idx += 1;
+	}
+
+	instances
+}
+
+fn prove_coarse_persistent_batch(instances: &[SpartanOuterScaleInstance], jobs: usize) -> B128 {
+	thread::scope(|scope| {
+		let mut handles = Vec::new();
+		for job_idx in 1..jobs {
+			handles.push(
+				scope.spawn(move || prove_coarse_persistent_worker(instances, jobs, job_idx)),
+			);
+		}
+
+		let mut acc = prove_coarse_persistent_worker(instances, jobs, 0);
+		for handle in handles {
+			acc += handle.join().expect("coarse worker should not panic");
+		}
+		acc
+	})
+}
+
+fn prove_coarse_persistent_worker(
+	instances: &[SpartanOuterScaleInstance],
+	jobs: usize,
+	job_idx: usize,
+) -> B128 {
+	let mut acc = B128::ZERO;
+	for instance_idx in (job_idx..instances.len()).step_by(jobs) {
+		let instance = &instances[instance_idx];
+		let proof = prove_spartan_outer_from_packed_folded_columns_with_claim_persistent_fused::<
+			B128,
+			OptimalPackedB128,
+		>(
+			instance.packed_columns.clone(),
+			instance.first_round_challenge,
+			instance.zerocheck_challenges.clone(),
+			&instance.sumcheck_challenges,
+			instance.folded_claim,
+		)
+		.unwrap();
+		acc += proof.final_eval;
+	}
+	acc
 }
 
 fn spartan_outer_scale_perm_counts() -> Vec<usize> {

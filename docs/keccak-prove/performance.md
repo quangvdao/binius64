@@ -564,6 +564,67 @@ Within one sumcheck instance, the next lower-level experiment would be a hand-pi
 with explicit CCD partitioning and hardware-counter measurements under a lower
 `perf_event_paranoid` setting, to distinguish memory bandwidth from arithmetic-port saturation.
 
+### Coarse-Grain Multi-Instance Experiment
+
+A follow-up benchmark tests that coarse-grain hypothesis without changing the production proof yet.
+It is enabled only when:
+
+```text
+KECCAK_SPARTAN_OUTER_COARSE_CHUNK_PERMS=<chunk size>
+KECCAK_SPARTAN_OUTER_COARSE_JOBS=<parallel chunk jobs>
+```
+
+The benchmark name is:
+
+```text
+prove_packed_persistent_fused_coarse_<jobs>_jobs_<chunk>_per_chunk
+```
+
+It splits the total permutation count into distinct chunk instances, proves each chunk with the
+packed persistent fused outer prover, and runs several chunks concurrently. This is not yet an
+integrated aggregation protocol; it is a performance probe for whether independent sumcheck
+instances use the machine better than one large synchronized instance.
+
+The answer is yes. On `leopard` native at 32,768 total permutations:
+
+| Shape | Env sketch | Median time |
+|---|---|---:|
+| One synchronized instance | `RAYON_NUM_THREADS=16 KECCAK_OUTER_WORKERS=16`, 16,384 min words/worker | 490.1 ms |
+| 4 chunks of 8,192 | 4 coarse jobs, 4 inner workers/chunk, 4,096 min words/worker | 308.5 ms |
+| 8 chunks of 4,096 | 8 coarse jobs, 2 inner workers/chunk, 4,096 min words/worker | 297.9 ms |
+| 8 chunks of 4,096 | 8 coarse jobs, 4 inner workers/chunk, 4,096 min words/worker | 304.9 ms |
+| 16 chunks of 2,048 | 8 coarse jobs, 2 inner workers/chunk, 2,048 min words/worker | 276.7 ms |
+| 16 chunks of 2,048 | 16 coarse jobs, 2 inner workers/chunk, 2,048 min words/worker | 303.7 ms |
+| 32 chunks of 1,024 | 16 coarse jobs, 2 inner workers/chunk, 1,024 min words/worker | 286.4 ms |
+
+The best measured shape in this sweep was therefore:
+
+```text
+KECCAK_SPARTAN_OUTER_SCALE_PERMS=32768
+KECCAK_SPARTAN_OUTER_COARSE_CHUNK_PERMS=2048
+KECCAK_SPARTAN_OUTER_COARSE_JOBS=8
+KECCAK_PACKED_FUSED_MIN_REDUCE_WORDS=65536
+KECCAK_PACKED_OUTER_MIN_WORDS_PER_WORKER=2048
+RAYON_NUM_THREADS=8
+KECCAK_OUTER_WORKERS=2
+```
+
+That is about 1.77x faster than the single 32,768-permutation outer instance in the same checkpoint.
+It also explains why simply raising the worker count inside one instance was disappointing: the
+machine wants more independent work, not more threads contending on the same shrinking buffers and
+round barriers.
+
+The implementation implication is important. For large Keccak batches, the better v0/v1 direction
+is likely:
+
+1. Partition the trace into proof chunks sized around the 1k-4k permutation range.
+2. Prove chunk-local post-skip outer claims concurrently.
+3. Aggregate the chunk claims with a small outer batching layer, rather than forcing one monolithic
+   sumcheck instance over the entire padded row domain.
+
+This would increase transcript and aggregation design work, but it is now the most concrete route
+to using 16-32 hardware threads effectively.
+
 ## Full-Path Checkpoint
 
 For 128 Keccak-f permutations:
