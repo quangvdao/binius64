@@ -223,6 +223,26 @@ At larger full-proof sizes, 16 physical cores can help, but SMT still does not:
 | 2,048 | 310.6 ms | 170.8 ms | 105.6 ms | 82.4 ms | 84.1 ms | 90.6 ms | 97.8 ms | 110.7 ms | 133.6 ms | 245.0 ms |
 | 8,192 | 1.276 s | 704.4 ms | 450.8 ms | 349.6 ms | 327.8 ms | 327.7 ms | 338.1 ms | 355.6 ms | 384.7 ms | 553.9 ms |
 
+The 8k-32k target range changes the practical recommendation. A focused 2026-05-03 native
+`leopard` sweep used:
+
+```text
+CARGO_TARGET_DIR=target-native RUSTFLAGS="-C target-cpu=native"
+KECCAK_V0_PRODUCTION_PERMS=8192,16384,32768
+```
+
+and measured full v0 proving:
+
+| Keccak-f permutations | 8 threads | 12 threads | 16 threads | 24 threads | 32 threads |
+|---:|---:|---:|---:|---:|---:|
+| 8,192 | 349.7 ms | 327.0 ms | 326.7 ms | 356.3 ms | 554.2 ms |
+| 16,384 | 720.4 ms | 664.1 ms | 655.0 ms | 691.2 ms | 932.8 ms |
+| 32,768 | 1.465 s | 1.354 s | 1.316 s | 1.352 s | 1.616 s |
+
+So for the actual 8k-32k target range, the best default is 12-16 physical cores, not 8. The
+remaining wall is specifically SMT-heavy scheduling. 24 logical workers already regresses at
+8k/16k, and 32 logical workers is bad across the range.
+
 Affinity checks at 8,192 permutations showed:
 
 | Config | v0 prove time |
@@ -233,14 +253,27 @@ Affinity checks at 8,192 permutations showed:
 | 16 threads pinned to CPUs 0-7 and 16-23, one CCD plus SMT siblings | 406.3 ms |
 | 32 threads pinned to CPUs 0-31, all logical threads | 543.5 ms |
 
-The practical rule is:
+At 32,768 permutations, affinity checks reinforced the same diagnosis:
+
+| Config | v0 prove time |
+|---|---:|
+| 16 workers pinned to CPUs 0-15, all physical cores | 1.334 s |
+| 16 workers pinned to CPUs 0-7 and 16-23, one CCD plus SMT siblings | 1.522 s |
+| 16 workers pinned to CPUs 0-11, 12 physical cores | 1.376 s |
+
+This is the strongest current evidence for the root cause. Sumcheck and the surrounding proof are
+parallelizable, but this implementation streams large packed buffers and synchronizes each round.
+Physical cores help once the instance is large enough; SMT siblings mostly compete for the same
+execution ports, private caches, and memory bandwidth while adding scheduler traffic. The result is
+a saturation point around 12-16 physical cores on `leopard`, not a fundamental sumcheck limit.
+
+The practical rule for small checkpoints remains:
 
 ```text
 CARGO_TARGET_DIR=target-native RUSTFLAGS="-C target-cpu=native" RAYON_NUM_THREADS=8 ...
 ```
 
-for small-to-medium Keccak v0 and production Keccak benchmarks, including the 128- and
-2,048-permutation checkpoints. For larger batches around 8,192 permutations, use:
+for 128- and 2,048-permutation checkpoints. For the 8k-32k target range, use:
 
 ```text
 CARGO_TARGET_DIR=target-native RUSTFLAGS="-C target-cpu=native" RAYON_NUM_THREADS=12 ...
@@ -252,8 +285,8 @@ or:
 CARGO_TARGET_DIR=target-native RUSTFLAGS="-C target-cpu=native" RAYON_NUM_THREADS=16 ...
 ```
 
-The 12- and 16-thread settings were effectively tied at 8,192 permutations. Avoid 32 threads for
-this path unless a future implementation change specifically proves otherwise.
+Use 12 threads around 8k if minimizing tail latency; use 16 threads by 16k-32k. Avoid 24 and 32
+threads for this path unless a future implementation change specifically proves otherwise.
 
 The machine-level follow-up is to rerun a small subset with the CPU governor set to `performance`
 if we get root access. During this sweep all CPUs reported the `powersave` governor. That may affect
@@ -298,6 +331,27 @@ the folded-column outer-only comparison measured:
 |---:|---:|---:|---|
 | 128 | 1.152 ms | 0.766 ms | fused packed is ~1.5x faster |
 | 8,192 | 131.1 ms | 126.4 ms | fused packed is ~3.6% faster |
+
+The larger target-range sweep used the new bench filter:
+
+```text
+KECCAK_SPARTAN_OUTER_SCALE_PERMS=8192,16384,32768
+```
+
+At these sizes, prepacked fused is a small but consistent improvement over prepacked generic. The
+thread-count effect is larger than the fused-vs-generic effect:
+
+| Threads | 8,192 generic | 8,192 fused | 16,384 generic | 16,384 fused | 32,768 generic | 32,768 fused |
+|---:|---:|---:|---:|---:|---:|---:|
+| 8 | 125.6 ms | 124.9 ms | 260.9 ms | 255.3 ms | 501.4 ms | 483.7 ms |
+| 12 | 133.9 ms | 130.6 ms | 253.3 ms | 242.1 ms | 493.0 ms | 472.2 ms |
+| 16 | 127.6 ms | 126.4 ms | 252.1 ms | 243.7 ms | 496.2 ms | 475.7 ms |
+| 24 | 133.3 ms | 128.9 ms | 254.1 ms | 243.7 ms | 500.4 ms | 479.6 ms |
+| 32 | 131.9 ms | 127.8 ms | 267.0 ms | 254.1 ms | 503.5 ms | 483.3 ms |
+
+For the outer pass alone, 8 threads is still best at 8,192, while 12-16 threads catch up around
+16,384 and 32,768. The full proof benefits more clearly from 12-16 threads because other phases have
+enough work to use the extra physical cores.
 
 On the local laptop during a high-load run, timings were much noisier. A representative 8,192-perm
 sample showed prepacked fused packed columns at about 38.7 ms median, but the generic folded-column
@@ -626,9 +680,13 @@ This explains the second jump around 10,923 permutations.
 - Always report compiler target and Rayon thread count for cross-machine numbers.
 - On x86 servers, use `RUSTFLAGS="-C target-cpu=native"` unless the goal is portable-binary
   performance.
-- On `leopard`, start with `RAYON_NUM_THREADS=8` for Keccak v0 and production Keccak benchmarks.
+- On `leopard`, start with `RAYON_NUM_THREADS=8` for 128-2,048 permutation checkpoints.
+- On `leopard`, use `RAYON_NUM_THREADS=12` or `16` for the 8k-32k target range. Avoid 24 and 32
+  unless a new implementation demonstrates a win.
 - Treat local laptop numbers as invalid if load average is high or another CPU-heavy job is active.
 - When reporting scale sweeps, annotate power-of-two cliffs for both committed witness length and
   constraint-row length.
+- Use `KECCAK_SPARTAN_OUTER_SCALE_PERMS` and `KECCAK_V0_PRODUCTION_PERMS` to restrict Criterion to
+  the sizes being studied so large sweeps do not build unrelated instances.
 - Continue to benchmark v0 against the production Keccak path, not only microbenchmarks, because
   the thread-count cliff affected both paths.

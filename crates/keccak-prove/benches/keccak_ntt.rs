@@ -511,9 +511,7 @@ fn bench_keccak_spartan_outer_scale(c: &mut Criterion) {
 	group.sample_size(10);
 	group.measurement_time(Duration::from_secs(6));
 
-	for total_perms in [
-		128, 256, 512, 1024, 2048, 4096, 8192, 12288, 16384, 24576, 28672, 32768, 55924, 65536,
-	] {
+	for total_perms in spartan_outer_scale_perm_counts() {
 		let mut rng = StdRng::seed_from_u64(19 + total_perms as u64);
 		let mut round_traces = Vec::with_capacity(total_perms * KECCAK_ROUNDS_PER_PERM);
 		for _ in 0..total_perms {
@@ -697,6 +695,29 @@ fn bench_keccak_spartan_outer_scale(c: &mut Criterion) {
 			},
 		);
 	}
+}
+
+fn spartan_outer_scale_perm_counts() -> Vec<usize> {
+	env::var("KECCAK_SPARTAN_OUTER_SCALE_PERMS")
+		.ok()
+		.map(|value| {
+			value
+				.split(',')
+				.map(str::trim)
+				.filter(|part| !part.is_empty())
+				.map(|part| {
+					part.parse::<usize>().expect(
+						"KECCAK_SPARTAN_OUTER_SCALE_PERMS must be comma-separated usize values",
+					)
+				})
+				.collect()
+		})
+		.unwrap_or_else(|| {
+			vec![
+				128, 256, 512, 1024, 2048, 4096, 8192, 12288, 16384, 24576, 28672, 32768, 55924,
+				65536,
+			]
+		})
 }
 
 fn scale_chunks(total_perms: usize) -> Vec<(Vec<RoundTrace>, Vec<AESTowerField8b>)> {
