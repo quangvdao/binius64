@@ -52,6 +52,68 @@ Important lessons from the initial implementation:
 - The transcripted segment now links the first-round message to the post-skip MLE-check using the verifier's full row point. The packed small-field path is still useful as a fast benchmark/reference, but it is no longer a correctness restriction for transcript replay.
 - Production Shift reduces BitAnd and IntMul claims through a two-phase protocol: a `g * h` sumcheck over bit/shift variables, followed by a bivariate product against the folded committed witness and the monster multilinear. The Keccak linear-layer pushback should be expressed in that shape. A custom direct claim rewrite over the current `(round_trace, lane)` rows would be a different, less production-faithful design.
 
+## Locked-in committed witness layout
+
+The committed witness layout for the specialized Keccak prover is:
+
+```text
+per permutation, per round-boundary block:
+  slots 0..24   A_r[x,y]   round-boundary state lanes
+  slots 25..29  D_r[x]     theta correction words
+  slots 30..31  padding
+```
+
+Each block is exactly 32 committed words. A full Keccak-f[1600] permutation uses 25 blocks:
+
+```text
+blocks r = 0..24
+A_r exists in every block
+D_r exists only for r = 0..23
+block 24 stores the final A_24 state and padding only
+```
+
+The stable word indices are:
+
+```text
+block(p, r) = p * 25 * 32 + r * 32
+A(p, r, lane) = block(p, r) + lane
+D(p, r, x)    = block(p, r) + 25 + x
+```
+
+Active data per permutation:
+
+```text
+A: 25 states * 25 lanes = 625 words
+D: 24 rounds * 5 words  = 120 words
+active total            = 745 words
+padding                 = 55 words
+committed total         = 800 words
+```
+
+This intentionally commits the theta correction words `D` but not the pre-chi state `B`.
+The virtual pre-chi lanes are:
+
+```text
+B_r[y, 2x + 3y] = rotl_{rho[x,y]}(A_r[x,y] + D_r[x])
+```
+
+Equivalently, every `B` reference is lowered into two shifted committed terms:
+
+```text
+B_r[pi(x,y)] = shifted(A_r[x,y]) + shifted(D_r[x])
+```
+
+The `D` correctness relations are linear and Shift-compatible:
+
+```text
+D_r[x] + sum_y A_r[x-1,y] + sum_y rotl_1(A_r[x+1,y]) = 0
+```
+
+These can be encoded as degenerate AND constraints with `0 * 0 = linear_operand`, allowing the
+production Shift reduction to reduce them to committed witness openings. Keeping `B` virtual avoids
+an additional 25 committed words per round while preserving small enough shifted operands for the
+chi/iota claims.
+
 Observed benchmark checkpoint on this machine:
 
 ```text
@@ -130,9 +192,10 @@ The production BitAnd full-zerocheck benchmark measured approximately **24.8 ms*
 
 ## Next steps
 
-The next implementation milestone is to connect the transcripted chi/iota segment to the committed-witness path:
+The next implementation milestone is to connect the transcripted chi/iota segment to the locked-in committed-witness path:
 
-1. Decide the committed-witness layout for Keccak state words so input, round-boundary, and output lanes have stable word indices.
-2. Represent the Keccak linear layer (`theta`, `rho`, `pi`) as production Shift-compatible shifted operands or an equivalent `KeyCollection`-style relation, then reuse the Shift two-phase reduction for the folded `P`, `Q`, and `C` claims.
-3. Integrate boundary openings for committed input/output states through the same ring-switching and PCS opening path used after production Shift.
-4. Add an end-to-end benchmark against the generic `binius-examples` Keccak circuit path, while keeping the current microbenches as regression tripwires.
+1. Implement `layout.rs` helpers for the 32-word block indexing above.
+2. Implement witness construction for committed `A` and `D` words, with `B` kept virtual.
+3. Represent `D` correctness and virtual `B` references as production Shift-compatible shifted operands, then reuse the Shift two-phase reduction for the folded `P`, `Q`, and `C` claims.
+4. Integrate boundary openings for committed input/output states through the same ring-switching and PCS opening path used after production Shift.
+5. Add an end-to-end benchmark against the generic `binius-examples` Keccak circuit path, while keeping the current microbenches as regression tripwires.
