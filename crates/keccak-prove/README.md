@@ -48,6 +48,14 @@ Criterion throughput is reported as constraints processed per iteration:
 - `128 * 24 * 25` lane constraints for the Keccak round-message accumulator;
 - `2^(log_num_rows - 6)` word constraints for the production BitAnd reference.
 
+The scale benchmark can be run directly with:
+
+```text
+cargo bench -p binius-keccak-prove --bench keccak_ntt -- keccak_first_round_claim_scale
+```
+
+On the initial implementation machine, the current `first_round_claim_small_par` path crossed roughly 500 ms at 65,536 effective Keccak-f permutations, using a 2048-permutation batch repeated by the benchmark harness.
+
 For broader production comparisons, also run:
 
 ```text
