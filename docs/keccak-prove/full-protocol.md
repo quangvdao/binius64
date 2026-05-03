@@ -1,12 +1,15 @@
 # `keccak-prove`: full protocol working note
 
-**Status:** notation-first scratch draft.
-**Goal:** define a Keccak-aware Spartan-style protocol before committing to implementation details.
-**Current design target:** $K = 3$ Spartan-outer plus a Keccak-aware Spartan-inner.
+**Status:** Binius-native v0 planning note.
+**Goal:** implement a parallel Keccak-f[1600] proving path inside `crates/keccak-prove`.
+**Current design target:** adapt production BitAnd, shift-reduction, and bit-axis NTT lookup machinery to Keccak's fixed round structure.
 
 This file is intentionally separate from `design.md`.
 `design.md` records the earlier one-fused-sumcheck-per-round design.
-This note is where we will rebuild the full protocol notation and then decide what should replace that design.
+
+Earlier sections of this note develop a conservative serial claim-propagation invariant.
+That invariant remains valuable for tests, but it is not the implementation target anymore.
+Now that this work lives inside the Binius64 tree, v0 should be more ambitious: parallel, NTT-backed, and closely derived from the production BitAnd and shift code.
 
 ## 1. Keccak state notation
 
@@ -145,7 +148,8 @@ For the round and lane axes we have two implementation choices:
 
 1. **Padded Boolean hypercube.**
    Encode $t$, $x$, and $y$ in binary, pad to the next power of two, and multiply by transparent validity selectors.
-   This matches existing Boolean-hypercube sumcheck infrastructure and should be the first implementation target.
+   This matches existing Boolean-hypercube sumcheck infrastructure and is still the default for the serial test harness.
+   The Binius-native v0 target in §13 may benchmark exact mixed domains after the padded path works.
 2. **Exact mixed domains.**
    Use a size-24 round domain and size-5 lane-coordinate domains, or factor $24$ and $25$ as small domains such as $3 \times 8$ and $5 \times 5$.
    This may reduce padding and transcript waste, but it requires more custom domain code.
@@ -353,9 +357,9 @@ The first boundary claim can be chosen in this form.
 After one Keccak-aware inner pushback, the bit kernel has been permuted by rho rotations and mixed by theta transpose.
 The result is still transparent and cheap to evaluate, but it is generally a 64-entry lane-bit vector, not one point-evaluation vector.
 
-For this reason, the implementation-safe serial v0 should support a general carried lane-bit kernel.
+For this reason, the serial test harness should support a general carried lane-bit kernel.
 The exact path is an ordinary Spartan sumcheck over the bit variables, lane variables, and batch variables, with the carried kernel as a transparent multiplicative factor.
-The 128-evaluation univariate-skip path remains a fast path for rounds whose carried kernel has the required rank-one bit form, or for a segmented/full-trace variant that resets each round to a fresh boundary claim.
+The rank-one univariate-skip path is useful as a special case, but the Binius-native v0 target in §13 should instead use the residual-zero NTT shape from the production BitAnd path.
 
 ### Linear map convention
 
@@ -431,7 +435,7 @@ The last term is the transpose of the one-bit rotate-left in theta, i.e. a one-b
 This formula is the main reason the Keccak inner is simpler than binius64 Shift Reduction.
 There are only 25 lane kernels and two fixed cyclic shifts, not a general table of shifted witness operands.
 
-For serial v0, this inner step does not need its own sumcheck.
+For the serial harness, this inner step does not need its own sumcheck.
 It is a deterministic verifier-side kernel update plus matching prover bookkeeping.
 If a later globalized protocol commits all intermediate trace layers and wants to batch many linear-layer checks at once, we can reintroduce a matrix or lincheck-style sumcheck.
 That is a different mode from the serial claim-propagation design.
@@ -584,11 +588,12 @@ This is probably the best v0 invariant:
 In this invariant, every layer has the same interface.
 The carried object is a scalar linear claim plus transparent kernel data, not a whole lower-half vector and not a new witness column.
 
-### Rank-one bit-kernel fast path
+### Historical rank-one bit-kernel path
 
 When the carried bit kernel is a point-evaluation kernel, one round can use the 128-evaluation bit-axis skip.
-This is the right fast path for an initial boundary claim or a segmented mode that resets the kernel at committed boundaries.
+This is the right special case for an initial boundary claim or a segmented mode that resets the kernel at committed boundaries.
 It is not, by itself, the complete serial protocol after arbitrary Keccak inner pushback.
+It is also not the Binius-native v0 target; §13 prefers the residual-zero BitAnd-style NTT path.
 
 For one round $t$ in this fast path:
 
@@ -717,10 +722,11 @@ Once this is implemented, the obvious optimization experiment is the residual va
 include $A_{\mathrm{next}}+\mathrm{Iota}$ in the same NTT loop and send only the upper 64 evaluations.
 That may be worth it if transcript size or first-round interpolation becomes visible in benchmarks.
 
-## 9. Implementation-ready serial v0
+## 9. Serial claim invariant for tests
 
-This section is the exact protocol to implement first.
-It prioritizes a uniform serial claim invariant over the bit-axis univariate-skip optimization.
+This section records a useful algebraic test harness, not the v0 implementation target.
+It prioritizes a uniform serial claim invariant over the bit-axis univariate-skip optimization, so it is good for catching sign, rotation, and bit-order bugs.
+The production implementation should instead follow the Binius-native target in §13.
 
 ### Statement
 
@@ -738,7 +744,7 @@ Equivalently, the Keccak sub-protocol proves that the output claim is consistent
 
 ### Kernel representation
 
-For serial v0, represent the carried kernel as
+For the serial harness, represent the carried kernel as
 
 ```text
 Kernel {
@@ -885,16 +891,16 @@ $$\mathsf{Claim}(A^{(0)},K^{(0)},s^{(0)}).$$
 The parent protocol batches this input-boundary claim with the original output-boundary claim and any other oracle-opening claims.
 In a standalone test harness, the verifier can check both claims directly by evaluating the explicit input and output traces.
 
-### Implementation checklist
+### Serial test checklist
 
-The first implementation should land in this order:
+If we build the serial harness, it should land in this order:
 
 1. `trace`: compute all 25 pre-chi words $D^{(t)}$ from one round input.
 2. `kernel`: implement `Kernel`, rho-pi transpose, theta transpose, and direct claim evaluation against a trace.
 3. `outer`: implement the ordinary degree-3 sumcheck over `(z,x,y,u)` with virtual accessors for $P,Q,R$.
 4. `round`: implement one backward round, including transcript order, final $P,Q,R$ eval batching, and kernel pushback.
 5. `chain`: run 24 rounds and compare the final input claim against a reference Keccak permutation trace.
-6. `fast_path`: add the rank-one bit-kernel univariate skip only after the ordinary serial path is correct.
+6. compare its carried claims against the parallel v0 implementation as a debugging oracle.
 
 The main tests should be:
 
@@ -919,8 +925,10 @@ This controls how many Keccak rounds are virtualized between committed or extern
   Commit or externally bind only segment boundaries, and virtualize the rounds inside each segment by repeated claim pushback.
 
 The protocol should expose this knob even if v0 only implements one value.
-The likely v0 choice is serial mode, because it avoids committing intermediate layers and keeps the inner step as transparent claim propagation.
-After the implementation is working, benchmarks can tune $s_{\mathrm{seg}}$.
+The old conservative v0 choice was serial mode, because it avoided committing intermediate layers and kept the inner step as transparent claim propagation.
+That is no longer the right default now that the implementation lives inside Binius64.
+The Binius-native v0 should start with a parallel or segmented-parallel shape and only use serial mode as a correctness harness.
+Benchmarks should tune $s_{\mathrm{seg}}$ after the NTT-backed implementation is working.
 
 ## 11. Relation to binius64
 
@@ -939,183 +947,150 @@ The outer should stay Spartan-like with a small number of operand polynomials.
 
 ## 12. Remaining decisions before protocol text
 
-- Whether the residual-zero variant is worth implementing after the scalar-kernel v0 is benchmarked.
-- Whether segmented mode should be specified before implementation, or only exposed as a later parameter.
+- How large the first round segment should be: all 24 rounds in one global outer, or smaller segments such as 4, 6, 8, or 12 rounds.
+- Whether the residual-zero variant should be the default because it recovers BitAnd's upper-half-only first message.
+- How much of generic shift reduction to reuse directly versus copy and specialize for Keccak's fixed maps.
 - Whether exact mixed domains for $(t,x,y)$ are worth implementing after padded Boolean domains are measured.
 
-## 13. Next implementation slice
+## 13. Binius-native v0 implementation target
 
-The next useful artifact is not another protocol variant.
-It is a minimal serial-v0 implementation skeleton that makes the claim invariant executable and testable before optimizing the bit axis.
+The v0 implementation should live in `crates/keccak-prove`.
+It should be ambitious because it is now inside the Binius64 workspace and can reuse production prover internals directly.
 
-The crate should be organized around four small modules:
+The target is not a slow serial teaching implementation.
+The target is a Keccak-specific prover that adapts the production BitAnd and shift-reduction architecture:
 
-```text
-src/
-  lib.rs
-  constants.rs
-  trace.rs
-  kernel.rs
-  serial.rs
-```
-
-`constants.rs` owns the FIPS constants:
-
-- the 24 round constants as `u64`;
-- the 25 rho offsets indexed by `x + 5*y`;
-- helper functions for `lane(x, y)`, `x_of_lane(lane)`, and `y_of_lane(lane)`.
-
-`trace.rs` owns native Keccak execution:
-
-- `theta_rho_pi(state: [u64; 25]) -> [u64; 25]`, returning the pre-chi `D` lanes;
-- `chi_iota(pre_chi: [u64; 25], rc: u64) -> [u64; 25]`;
-- `round(state: [u64; 25], rc: u64) -> [u64; 25]`;
-- `permutation(state: [u64; 25]) -> [u64; 25]`;
-- optionally `round_trace(input: [u64; 25]) -> [[u64; 25]; 25]` once array initialization is convenient.
-
-The first trace implementation should be boring and explicit.
-Use the unrolled equations from `design.md` as the reference.
-Do not attempt to fuse protocol kernels into trace execution yet.
-
-`kernel.rs` owns transparent carried kernels:
-
-```text
-Kernel<F> {
-    batch_point: Vec<F>,
-    lane_bit: [[F; 64]; 25],
-}
-```
-
-For v0, `Kernel` is a verifier-side object.
-It must support:
-
-- `evaluate_on_state(states: &[[u64; 25]]) -> F`, computing
-  $\sum_{x,y,z,u}K_{x,y}(z,u)A_{x,y}(z,u)$ directly for tests;
-- `iota_correction(round: usize) -> F`, computing
-  $\sum_{z,u}K_{0,0}(z,u)\mathrm{RC}_t(z)$;
-- `rho_pi_transpose() -> Kernel<F>`;
-- `theta_transpose() -> Kernel<F>`;
-- `push_pre_chi_to_input() -> Kernel<F>`, equal to `theta_transpose(rho_pi_transpose(self))`.
-
-The `Kernel` representation deliberately factors the batch axis as one multilinear point-evaluation kernel.
-The first code should therefore require `h` to be a power of two and use a small helper
-
-$$
-\operatorname{eq}(\rho,u)=\prod_i (1+\rho_i+u_i)
-$$
-
-when directly evaluating a claim against concrete witness states.
-In characteristic two, the Boolean selector term is `1 + rho_i` when `u_i = 0` and `rho_i` when `u_i = 1`.
-
-`serial.rs` owns the proof flow, but it should start as a checked algebraic harness before any transcript plumbing:
-
-1. take a concrete batch of input states;
-2. compute all native round boundaries;
-3. choose or accept an initial output `Kernel` and scalar;
-4. for each round, compute the direct table sum
+1. **BitAnd-style outer.**
+   Keep the $K=3$ operand shape
 
    $$
-   \sum_{z,x,y,u}
-   K^{(t+1)}_{x,y}(z,u)
-   \left(PQ-R\right);
+   P = 1 + D_{x+1,y}, \qquad Q = D_{x+2,y}, \qquad R = D_{x,y},
    $$
 
-5. assert that it equals `s_next + iota_correction`;
-6. sample fixed deterministic challenge points in tests;
-7. build the induced `D` kernel from the claimed `P,Q,R` evaluations;
-8. push it back to an input kernel;
-9. assert the pushed scalar evaluates correctly on the concrete previous boundary.
+   and prove the chi relation with the same broad machinery used for word-level AND constraints.
+2. **NTT lookup from the start.**
+   The bit axis should use the byte-table additive-NTT/Four-Russians path immediately.
+   This is not a later fast path.
+   The implementation should adapt `crates/prover/src/and_reduction/ntt_lookup.rs` and the surrounding BitAnd first-round message code.
+3. **Keccak-aware shift inner.**
+   Reuse the production shift-reduction insight, but remove genericity that Keccak does not need.
+   Keccak has fixed rho offsets, a fixed pi permutation, fixed chi neighbors, and theta's fixed sparse column-parity map.
+   There is no need for a general `KeyCollection` over arbitrary shifted operands in the final hot path.
+4. **Parallel or segmented-parallel proving.**
+   The first prover should batch across many Keccak permutations and should aim to batch across rounds as much as the claim interface permits.
+   A segmented mode is acceptable if one global 24-round outer forces too much boundary machinery too early.
+5. **Early benchmarkability.**
+   The crate should benchmark against the existing generic Keccak circuit path in `binius_circuits` early, even before every optimization is final.
 
-Only after this harness passes should `serial.rs` replace the direct table sum with a real sumcheck transcript.
+### Crate layout
 
-### Kernel transpose test formulas
-
-The most important tests are the transpose identities.
-They should be written before any prover code.
-
-For rho+pi, generate random state `B` and random kernel `K_D`.
-Compute:
-
-```text
-D = rho_pi(B)
-K_B = rho_pi_transpose(K_D)
-```
-
-and assert
-
-$$
-\langle K_D,D\rangle = \langle K_B,B\rangle.
-$$
-
-For theta, generate random state `A` and random kernel `K_B`.
-Compute:
+Use a new workspace crate:
 
 ```text
-B = theta(A)
-K_A = theta_transpose(K_B)
+crates/keccak-prove/
+  Cargo.toml
+  src/
+    lib.rs
+    constants.rs
+    trace.rs
+    operands.rs
+    bit_ntt.rs
+    outer.rs
+    linear_inner.rs
+    segment.rs
+    prove.rs
 ```
 
-and assert
+`constants.rs` owns the FIPS constants, rho offsets, lane-index helpers, and padded-domain constants.
+
+`trace.rs` owns native Keccak execution and compact word-level traces.
+It should be explicit and testable, but it is not the main proving abstraction.
+
+`operands.rs` owns virtual accessors for $P,Q,R$ from pre-chi words.
+It should support padded lane rows and validity selectors without materializing unnecessary arrays.
+
+`bit_ntt.rs` owns the Keccak-adapted bit-axis first-round logic.
+It should start by copying the shape of the production BitAnd NTT lookup code, then generalize only where Keccak requires row weights, round/lane selectors, or iota residual terms.
+
+`outer.rs` owns the Spartan/BitAnd-style outer relation over the chosen segment domain.
+It should be written so the segment axis can be one round, several rounds, or all 24 rounds.
+
+`linear_inner.rs` owns the Keccak-aware replacement for generic shift reduction:
+
+- chi-neighbor transpose on lanes;
+- pi inverse lane permutation;
+- rho inverse cyclic shifts on 64-entry bit kernels;
+- theta transpose via column-kernel sums and one-bit kernel rotations.
+
+`segment.rs` owns the segment boundary object and the handoff between outer and inner reductions.
+
+`prove.rs` owns the high-level prover/verifier entrypoints and transcript order.
+
+### Residual-zero default
+
+For the Binius-native implementation, prefer the residual-zero form:
 
 $$
-\langle K_B,B\rangle = \langle K_A,A\rangle.
+H = P Q - R - A_{\mathrm{next}}-\mathrm{Iota}.
 $$
 
-Run both tests across many random batches and include edge cases with a single nonzero bit in one lane.
-The single-bit cases are valuable because they catch off-by-one errors in the modulo-64 kernel rotations.
+On the 64 base bit positions, $H$ is zero.
+That matches the production BitAnd invariant and lets the prover send only the upper half of the doubled-domain NTT message.
+This is more invasive than the scalar carried-claim invariant because $A_{\mathrm{next}}$ participates in the outer relation, but it is the right v0 bias inside Binius64.
 
-### Round equation test
+If this makes the all-24-round global form awkward, use segmented proving:
 
-Before sumcheck, prove the round algebra directly.
-For every concrete round boundary:
+- commit or otherwise bind segment boundaries;
+- run the residual-zero BitAnd-style outer inside each segment;
+- use the Keccak-aware linear inner to avoid generic shift machinery inside the segment.
 
-```text
-D = theta_rho_pi(A_t)
-A_next = chi_iota(D, RC[t])
-```
+### Reuse points in Binius64
 
-For random carried kernels `K_next`, test
+The implementation should read and adapt these production paths:
 
-$$
-\langle K_{\mathrm{next}},A_{\mathrm{next}}\rangle
-+ I_t
-=
-\sum_{x,y,z,u}K_{\mathrm{next},x,y}(z,u)(P_{x,y}Q_{x,y}-R_{x,y}).
-$$
+- `crates/prover/src/and_reduction/`
+  for BitAnd first-round messages, sumcheck flow, and NTT lookup shape;
+- `crates/prover/src/fold_word.rs`
+  for byte-table/Four-Russians word folding;
+- `crates/prover/src/protocols/shift/`
+  for the generic shifted-word inner architecture;
+- `crates/ip-prover/src/sumcheck/`
+  for public sumcheck prover interfaces;
+- `crates/iop/src/channel.rs`
+  for final `OracleLinearRelation` boundary integration;
+- `crates/circuits/src/keccak/`
+  for existing circuit behavior and benchmark comparison.
 
-This is the executable form of the serial invariant.
-If this fails, the bug is in the chi/iota sign convention, the `P = 1 + D[x+1,y]` convention, or the bit order.
+The goal is to specialize production code, not to create a parallel toy implementation.
 
-### Sumcheck integration boundary
+### Correctness guardrails
 
-The first real sumcheck should be intentionally plain:
+Even though the v0 prover should be parallel and NTT-backed, keep the cheap algebraic tests from the serial plan:
 
-- Boolean variables: `z0..z5, x0..x2, y0..y2, u0..u{ell-1}`;
-- invalid lane rows return zero for `P,Q,R`;
-- the transparent kernel is evaluated as a multilinear table over `(z,x,y,u)`;
-- the univariate degree bound is 3.
+- rho/pi transpose identity;
+- theta transpose identity;
+- chi/iota residual identity on concrete states;
+- one-segment direct table sum versus prover message on tiny batches;
+- 24-round native Keccak trace agreement.
 
-This means the first implementation does **not** use the 128-point bit-axis skip.
-That is acceptable.
-It gives a slower but cleaner serial protocol that can be compared against the direct table sum.
-Once the ordinary sumcheck agrees with the direct table sum, add the bit-axis fast path as a separate module or feature.
+These tests should run before performance benchmarks.
+They are not the architecture, but they are the seatbelts.
 
 ### Near-term milestone
 
 The first milestone should be:
 
 ```text
-cargo test -p keccak-prove serial_claim_reduction_matches_native_keccak
+cargo test -p binius-keccak-prove keccak_bitand_residual_matches_native_round
 ```
 
 where the test:
 
-1. samples a small batch such as `h = 2` or `h = 4`;
-2. computes native Keccak-f[1600] outputs;
-3. creates a random output-boundary kernel in the serial-v0 representation;
-4. runs the 24-round direct claim reduction;
-5. verifies the final carried input claim against the original input batch.
+1. samples a small power-of-two batch;
+2. builds native Keccak pre-chi and next-state words for one or more rounds;
+3. constructs $P,Q,R,A_{\mathrm{next}},\mathrm{Iota}$;
+4. verifies that the residual is zero on all 64 base bit positions;
+5. verifies that the upper-half NTT message agrees with a direct extension-domain computation.
 
-This milestone does not prove anything cryptographically yet.
-It establishes that the Keccak-specific algebra, kernel representation, and backward claim propagation are consistent.
-That is the right foundation for adding the transcript and binius64 sumcheck pieces.
+The second milestone should prove and verify one segment using the Binius transcript and sumcheck machinery.
+The third milestone should benchmark against the generic Keccak circuit path.
