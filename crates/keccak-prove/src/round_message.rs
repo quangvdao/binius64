@@ -11,9 +11,11 @@ use binius_field::{
 		OutputWrappingTransformationFactory, Transformation,
 	},
 };
-use binius_ip::sumcheck::RoundCoeffs;
+use binius_ip::{channel::IPVerifierChannel, mlecheck, sumcheck::RoundCoeffs};
+use binius_ip_prover::channel::IPProverChannel;
 use binius_ip_prover::sumcheck::{
-	Error as SumcheckError, common::SumcheckProver, quadratic_mle::QuadraticMleCheckProver,
+	Error as SumcheckError, common::SumcheckProver, prove_single_mlecheck,
+	quadratic_mle::QuadraticMleCheckProver,
 };
 use binius_math::{
 	BinarySubspace, FieldBuffer,
@@ -299,6 +301,16 @@ pub struct SpartanOuterPass<F> {
 	pub final_eval: F,
 }
 
+/// Transcripted output for the Keccak chi/iota outer segment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpartanOuterTranscriptOutput<F> {
+	pub p_eval: F,
+	pub q_eval: F,
+	pub c_eval: F,
+	pub z_challenge: F,
+	pub eval_point: Vec<F>,
+}
+
 /// Build the folded outer columns for the remaining chi/iota Spartan sumcheck.
 pub fn folded_outer_columns<FChallenge, P>(
 	round_traces: &[RoundTrace],
@@ -461,6 +473,98 @@ where
 	)
 }
 
+/// Prove the Keccak chi/iota outer segment with a transcript channel.
+pub fn prove_spartan_outer_with_channel<FChallenge, P, Channel>(
+	lookup: &NttLookup<P>,
+	round_traces: &[RoundTrace],
+	eq_weights: &[P::Scalar],
+	zerocheck_challenges: Vec<FChallenge>,
+	channel: &mut Channel,
+) -> Result<SpartanOuterTranscriptOutput<FChallenge>, SumcheckError>
+where
+	FChallenge: BinaryField + Field + From<P::Scalar> + WithUnderlier,
+	FChallenge::Underlier: UnderlierWithBitOps,
+	P: PackedField,
+	P::Scalar: BinaryField + Field,
+	Channel: IPProverChannel<FChallenge>,
+{
+	let upper_half_message = par_upper_half_round_message_small_weights::<FChallenge, P>(
+		lookup,
+		round_traces,
+		eq_weights,
+	);
+	channel.send_many(&upper_half_message);
+
+	let z_challenge = channel.sample();
+	let prover_message_domain =
+		BinarySubspace::<P::Scalar>::with_dim(crate::bit_ntt::LOG_LANE_BITS + 1)
+			.isomorphic::<FChallenge>();
+	let folded_claim =
+		next_sum_claim_from_upper_half(&upper_half_message, z_challenge, &prover_message_domain);
+	let columns = folded_outer_columns::<FChallenge, P>(round_traces, z_challenge);
+	assert_eq!(zerocheck_challenges.len(), columns.log_rows);
+
+	let prover = QuadraticMleCheckProver::new(
+		columns.into_field_buffers(),
+		|[p, q, c]| p * q - c,
+		|[p, q, _]| p * q,
+		zerocheck_challenges,
+		folded_claim,
+	)?;
+	let prove_output = prove_single_mlecheck(prover, channel)?;
+
+	assert_eq!(prove_output.multilinear_evals.len(), 3);
+	channel.send_many(&prove_output.multilinear_evals);
+
+	let mut eval_point = prove_output.challenges;
+	eval_point.reverse();
+
+	Ok(SpartanOuterTranscriptOutput {
+		p_eval: prove_output.multilinear_evals[0],
+		q_eval: prove_output.multilinear_evals[1],
+		c_eval: prove_output.multilinear_evals[2],
+		z_challenge,
+		eval_point,
+	})
+}
+
+/// Verify the transcripted Keccak chi/iota outer segment.
+pub fn verify_spartan_outer_with_channel<F, Channel>(
+	zerocheck_challenges: &[Channel::Elem],
+	channel: &mut Channel,
+	round_message_univariate_domain: &BinarySubspace<Channel::Elem>,
+) -> Result<SpartanOuterTranscriptOutput<Channel::Elem>, binius_ip::sumcheck::Error>
+where
+	F: BinaryField,
+	Channel: IPVerifierChannel<F>,
+	Channel::Elem: BinaryField,
+{
+	let upper_half_message = channel.recv_array::<LANE_BITS>()?;
+	let z_challenge = channel.sample();
+	let folded_claim = next_sum_claim_from_upper_half(
+		&upper_half_message,
+		z_challenge,
+		round_message_univariate_domain,
+	);
+
+	let binius_ip::sumcheck::SumcheckOutput {
+		eval,
+		challenges: mut eval_point,
+	} = mlecheck::verify(zerocheck_challenges, 2, folded_claim, channel)?;
+
+	let [p_eval, q_eval, c_eval] = channel.recv_array()?;
+	channel.assert_zero(p_eval * q_eval - c_eval - eval)?;
+	eval_point.reverse();
+
+	Ok(SpartanOuterTranscriptOutput {
+		p_eval,
+		q_eval,
+		c_eval,
+		z_challenge,
+		eval_point,
+	})
+}
+
 /// Run the post-skip Spartan outer pass when the folded claim is already known.
 ///
 /// In the full BitAnd-style flow this claim is obtained by extrapolating the univariate skip
@@ -595,6 +699,8 @@ fn accumulate_round_trace_small_weights<P>(
 #[cfg(test)]
 mod tests {
 	use binius_field::{AESTowerField8b, BinaryField128bGhash, PackedAESBinaryField16x8b, Random};
+	use binius_math::multilinear::eq::eq_ind_partial_eval_scalars;
+	use binius_transcript::{ProverTranscript, fiat_shamir::HasherChallenger};
 	use rand::{Rng, SeedableRng, rngs::StdRng};
 
 	use crate::{
@@ -607,6 +713,7 @@ mod tests {
 
 	type B128 = BinaryField128bGhash;
 	type P = PackedAESBinaryField16x8b;
+	type StdChallenger = HasherChallenger<sha2::Sha256>;
 
 	fn round_traces(trace: &PermutationTrace) -> Vec<RoundTrace> {
 		trace.rounds.to_vec()
@@ -774,5 +881,49 @@ mod tests {
 			claim = round_message.evaluate(challenge);
 		}
 		assert_eq!(claim, pass.final_eval);
+	}
+
+	#[test]
+	fn transcripted_spartan_outer_verifier_replays() {
+		let mut rng = StdRng::seed_from_u64(17);
+		let lookup = NttLookup::<P>::for_upper_half_domain();
+		let traces: Vec<_> = (0..2)
+			.map(|_| PermutationTrace::new(rng.random::<State>()))
+			.collect();
+		let round_traces: Vec<_> = traces.iter().flat_map(|trace| trace.rounds).collect();
+		let log_rows = (round_traces.len() * N_LANES).next_power_of_two().ilog2() as usize;
+		let small_zerocheck_challenges: Vec<_> = (0..log_rows)
+			.map(|_| rng.random::<AESTowerField8b>())
+			.collect();
+		let zerocheck_challenges: Vec<_> = small_zerocheck_challenges
+			.iter()
+			.copied()
+			.map(B128::from)
+			.collect();
+		let small_weights = eq_ind_partial_eval_scalars(&small_zerocheck_challenges);
+		let small_weights = small_weights[..round_traces.len() * N_LANES].to_vec();
+
+		let mut prover_transcript = ProverTranscript::<StdChallenger>::default();
+		let prove_output = prove_spartan_outer_with_channel::<B128, P, _>(
+			&lookup,
+			&round_traces,
+			&small_weights,
+			zerocheck_challenges.clone(),
+			&mut prover_transcript,
+		)
+		.unwrap();
+
+		let mut verifier_transcript = prover_transcript.into_verifier();
+		let round_message_domain =
+			BinarySubspace::<AESTowerField8b>::with_dim(crate::bit_ntt::LOG_LANE_BITS + 1)
+				.isomorphic::<B128>();
+		let verify_output = verify_spartan_outer_with_channel(
+			&zerocheck_challenges,
+			&mut verifier_transcript,
+			&round_message_domain,
+		)
+		.unwrap();
+
+		assert_eq!(prove_output, verify_output);
 	}
 }

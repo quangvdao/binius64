@@ -34,7 +34,8 @@ What has been implemented so far:
 - first-round claim extrapolation at the verifier challenge;
 - a folded post-first-challenge claim check that directly folds each lane word and matches the verifier's extrapolated next claim;
 - explicit folded `P`, `Q`, `R`, next-state, and iota columns over padded `(round_trace, lane)` rows;
-- a first full Spartan outer pass after the bit-axis univariate skip, using the production `QuadraticMleCheckProver` for the remaining degree-2 MLE-check rounds.
+- a first full Spartan outer pass after the bit-axis univariate skip, using the production `QuadraticMleCheckProver` for the remaining degree-2 MLE-check rounds;
+- transcripted prover and verifier replay for the chi/iota segment, following the production BitAnd channel flow.
 
 Important lessons from the initial implementation:
 
@@ -47,6 +48,7 @@ Important lessons from the initial implementation:
 - Microbenchmarks must report constraints processed per iteration. Earlier raw timings compared very different workloads and overstated the gap to production BitAnd.
 - The current first-round claim path is still only the first sumcheck-message layer, not an end-to-end Keccak proof. It does not yet include folding through subsequent sumcheck rounds, transcript integration, committed input/output boundary openings, or full proof serialization.
 - The post-skip outer pass uses the MLE-check identity from production Binius, so each remaining round message is tied to the current zerocheck coordinate by `(1 - alpha) r(0) + alpha r(1)`, not by the vanilla `r(0) + r(1)` sumcheck identity.
+- The transcripted segment currently links the first-round message to the post-skip MLE-check when the row weights are the equality tensor for the verifier's row point. The next fidelity improvement is to port BitAnd's split small/big challenge accumulation so the univariate message can take verifier-field row challenges directly.
 
 Observed benchmark checkpoint on this machine:
 
@@ -126,10 +128,9 @@ The production BitAnd full-zerocheck benchmark measured approximately **24.8 ms*
 
 ## Next steps
 
-The next implementation milestone is to turn the current prover-driven pass into a transcripted, verifier-replayed segment:
+The next implementation milestone is to make the transcripted chi/iota segment fully production-faithful:
 
-1. Add transcript plumbing around the univariate message and the post-skip quadratic MLE-check rounds.
-2. Add verifier-side replay for this one Keccak chi/iota segment, including the MLE-check round identity.
-3. Integrate boundary openings for committed input/output states.
-4. Push folded `P`, `Q`, and `R` claims backward through the Keccak linear layer (`pi`, `rho`, `theta`) instead of treating pre-chi lanes as terminal columns.
-5. Add an end-to-end benchmark against the generic `binius-examples` Keccak circuit path, while keeping the current microbenches as regression tripwires.
+1. Port BitAnd's split small/big row-challenge accumulation into Keccak's first-round message, replacing the current small-field row-weight limitation.
+2. Integrate boundary openings for committed input/output states.
+3. Push folded `P`, `Q`, and `C` claims backward through the Keccak linear layer (`pi`, `rho`, `theta`) instead of treating pre-chi lanes as terminal columns.
+4. Add an end-to-end benchmark against the generic `binius-examples` Keccak circuit path, while keeping the current microbenches as regression tripwires.

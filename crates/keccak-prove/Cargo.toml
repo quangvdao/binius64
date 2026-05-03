@@ -18,9 +18,11 @@ binius-utils = { path = "../utils" }
 [dev-dependencies]
 binius-core = { path = "../core" }
 binius-prover = { path = "../prover" }
+binius-transcript = { path = "../transcript" }
 binius-verifier = { path = "../verifier" }
 criterion.workspace = true
 rand = { workspace = true, features = ["thread_rng"] }
+sha2.workspace = true
 
 [[bench]]
 name = "keccak_ntt"
