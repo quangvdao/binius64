@@ -38,6 +38,7 @@ They track three baselines while the prover path is still being assembled:
 - `upper_half_round_message_small_seq` and `upper_half_round_message_small_par`: the production-shaped variant that keeps lane weights packed in the NTT field and widens only after accumulation.
 - `first_round_claim_small_par`: the production-shaped first-round flow, including upper-half accumulation, full 128-point message construction with zero base-domain values, and extrapolation at a verifier challenge.
 - `keccak_first_round_claim_scale`: a distinct-data batch sweep up to 196,608 effective permutations with Criterion `sample_size(10)` to track where first-round work crosses roughly 500 ms.
+- `keccak_spartan_outer`: the folded-column construction, folded outer claim, and remaining post-skip Spartan outer rounds for 128 permutations.
 - `production_bitand_lookup_precompute`: the existing Binius64 BitAnd lookup setup, using the same domain shape.
 - `production_bitand_reference`: the existing Binius64 BitAnd univariate round-message hot path.
 
@@ -55,6 +56,14 @@ cargo bench -p binius-keccak-prove --bench keccak_ntt -- keccak_first_round_clai
 ```
 
 On the initial implementation machine, the current `first_round_claim_small_par_distinct` path crossed roughly 500 ms by median at 131,072 Keccak-f permutations. The scale benchmark allocates distinct traces and weights for each measured permutation count, using distinct 65,536-permutation chunks for larger totals.
+
+The initial post-skip outer benchmark is:
+
+```text
+cargo bench -p binius-keccak-prove --bench keccak_ntt -- keccak_spartan_outer
+```
+
+On 128 permutations, `prove_after_univariate_skip` measured about 68 ms median. This covers the remaining degree-2 Spartan outer rounds after the bit-axis univariate skip, but not transcript serialization, verifier replay, or boundary-opening reductions.
 
 For broader production comparisons, also run:
 

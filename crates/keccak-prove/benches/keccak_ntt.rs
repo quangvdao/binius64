@@ -7,8 +7,9 @@ use binius_field::{AESTowerField8b, Field, PackedAESBinaryField16x8b, Random};
 use binius_keccak_prove::{
 	bit_ntt::{NttLookup, upper_half_domains, upper_half_residual_evals},
 	round_message::{
-		par_first_round_claim_small_weights, par_upper_half_round_message,
-		par_upper_half_round_message_small_weights, upper_half_round_message,
+		folded_outer_claim, folded_outer_columns, par_first_round_claim_small_weights,
+		par_upper_half_round_message, par_upper_half_round_message_small_weights,
+		prove_spartan_outer_after_first_round, upper_half_round_message,
 		upper_half_round_message_small_weights,
 	},
 	trace::{PermutationTrace, RoundTrace, State},
@@ -248,6 +249,59 @@ fn bench_keccak_first_round_claim_scale(c: &mut Criterion) {
 	}
 }
 
+fn bench_keccak_spartan_outer(c: &mut Criterion) {
+	let mut rng = StdRng::seed_from_u64(18);
+	let traces: Vec<_> = (0..KECCAK_BENCH_PERMS)
+		.map(|_| PermutationTrace::new(rng.random::<State>()))
+		.collect();
+	let round_traces: Vec<_> = traces.iter().flat_map(|trace| trace.rounds).collect();
+	let first_round_challenge = B128::random(&mut rng);
+	let columns = folded_outer_columns::<B128, PackedAESBinaryField16x8b>(
+		&round_traces,
+		first_round_challenge,
+	);
+	let zerocheck_challenges: Vec<_> = (0..columns.log_rows)
+		.map(|_| B128::random(&mut rng))
+		.collect();
+	let sumcheck_challenges: Vec<_> = (0..columns.log_rows)
+		.map(|_| B128::random(&mut rng))
+		.collect();
+	let total_constraints = KECCAK_BENCH_PERMS * KECCAK_ROUNDS_PER_PERM * KECCAK_LANES_PER_ROUND;
+
+	let mut group = c.benchmark_group("keccak_spartan_outer");
+	group.sample_size(10);
+
+	group.throughput(Throughput::Elements(total_constraints as u64));
+	group.bench_function("folded_outer_columns/128_perms", |bench| {
+		bench.iter(|| {
+			black_box(folded_outer_columns::<B128, PackedAESBinaryField16x8b>(
+				&round_traces,
+				first_round_challenge,
+			))
+		});
+	});
+
+	group.throughput(Throughput::Elements(total_constraints as u64));
+	group.bench_function("folded_outer_claim/128_perms", |bench| {
+		bench.iter(|| black_box(folded_outer_claim(&columns, &zerocheck_challenges)));
+	});
+
+	group.throughput(Throughput::Elements(total_constraints as u64));
+	group.bench_function("prove_after_univariate_skip/128_perms", |bench| {
+		bench.iter(|| {
+			black_box(
+				prove_spartan_outer_after_first_round::<B128, PackedAESBinaryField16x8b>(
+					&round_traces,
+					first_round_challenge,
+					zerocheck_challenges.clone(),
+					&sumcheck_challenges,
+				)
+				.unwrap(),
+			)
+		});
+	});
+}
+
 fn scale_chunks(total_perms: usize) -> Vec<(Vec<RoundTrace>, Vec<AESTowerField8b>)> {
 	let mut remaining_perms = total_perms;
 	let mut chunk_idx = 0;
@@ -342,6 +396,7 @@ criterion_group!(
 	bench_ntt_lookup,
 	bench_keccak_residuals,
 	bench_keccak_first_round_claim_scale,
+	bench_keccak_spartan_outer,
 	bench_production_bitand_round_message
 );
 criterion_main!(keccak_ntt);
