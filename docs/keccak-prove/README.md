@@ -31,7 +31,8 @@ What has been implemented so far:
 - sequential and Rayon-parallel first-round accumulation;
 - a production-shaped packed small-field accumulator that keeps lane weights in the NTT field and widens to `B128` only after accumulation;
 - first-round message construction with the original 64-point domain set to zero and the shifted upper-half domain filled by the prover;
-- first-round claim extrapolation at the verifier challenge.
+- first-round claim extrapolation at the verifier challenge;
+- a folded post-first-challenge claim check that directly folds each lane word and matches the verifier's extrapolated next claim.
 
 Important lessons from the initial implementation:
 
@@ -46,27 +47,30 @@ Observed benchmark checkpoint on this machine:
 cargo bench -p binius-keccak-prove --bench keccak_ntt -- keccak_first_round_claim_scale
 ```
 
-With a 2048-permutation precomputed batch and Criterion `sample_size(10)`, the current
-`first_round_claim_small_par` path measured approximately:
+With Criterion `sample_size(10)`, the current `first_round_claim_small_par_distinct`
+path measured approximately:
 
 | Effective permutations | Median time |
 |---:|---:|
-| 2,048 | 15.7 ms |
-| 4,096 | 23.9 ms |
-| 8,192 | 96.7 ms |
-| 16,384 | 161.5 ms |
-| 32,768 | 345.9 ms |
-| 65,536 | 513.6 ms |
+| 2,048 | 8.78 ms |
+| 4,096 | 21.1 ms |
+| 8,192 | 35.9 ms |
+| 16,384 | 76.0 ms |
+| 32,768 | 155 ms |
+| 65,536 | 411 ms |
+| 131,072 | 983 ms |
+| 196,608 | 1.50 s |
 
-Thus the first measured effective size crossing roughly 500 ms for the current first-round-claim path is **65,536 Keccak-f permutations**.
+Thus the first measured size crossing roughly 500 ms by median for the current first-round-claim path is **131,072 Keccak-f permutations**.
 
-The key caveat is that this benchmark repeats a 2048-permutation batch to scale work. That is good enough for first-order throughput and cache/parallelism checks, but a later end-to-end benchmark should allocate and prove distinct batches at the target scale.
+The scale benchmark now allocates distinct traces and weights for each measured permutation count. For larger totals it uses distinct 65,536-permutation chunks and accumulates the chunk claims in one measured iteration, so the benchmark no longer depends on replaying the same 2048-permutation batch.
+It is still a first-round benchmark rather than an end-to-end proof benchmark.
 
 ## Next steps
 
 The next implementation milestone is to move from "first-round message and next claim" to "full first sumcheck segment":
 
-1. Add the folded MLE state after the first univariate challenge, mirroring the production BitAnd test that folds words with a bytewise transform.
+1. Turn the folded post-first-challenge claim into explicit folded operand columns for `P`, `Q`, `R`, next-state, and iota, rather than only a direct consistency check.
 2. Run the remaining quadratic sumcheck rounds for the Keccak chi/iota relation using the next claim produced by `par_first_round_claim_small_weights`.
 3. Add transcript plumbing and verifier-side replay for this one Keccak segment.
 4. Integrate boundary openings for committed input/output states.

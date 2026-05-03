@@ -21,7 +21,7 @@ const LANE_BYTES: usize = LANE_BITS / BYTE_BITS;
 pub const PACKED_EVALS: usize = LANE_BITS / 16;
 
 #[rustfmt::skip]
-const CHI_OPERAND_LANES: [(usize, usize, usize); N_LANES] = [
+pub(crate) const CHI_OPERAND_LANES: [(usize, usize, usize); N_LANES] = [
 	( 1,  2,  0), ( 2,  3,  1), ( 3,  4,  2), ( 4,  0,  3), ( 0,  1,  4),
 	( 6,  7,  5), ( 7,  8,  6), ( 8,  9,  7), ( 9,  5,  8), ( 5,  6,  9),
 	(11, 12, 10), (12, 13, 11), (13, 14, 12), (14, 10, 13), (10, 11, 14),

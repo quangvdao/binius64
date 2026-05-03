@@ -1,6 +1,6 @@
 // Copyright 2026 The Binius Developers
 
-use std::hint::black_box;
+use std::{hint::black_box, time::Duration};
 
 use binius_core::word::Word;
 use binius_field::{AESTowerField8b, Field, PackedAESBinaryField16x8b, Random};
@@ -11,7 +11,7 @@ use binius_keccak_prove::{
 		par_upper_half_round_message_small_weights, upper_half_round_message,
 		upper_half_round_message_small_weights,
 	},
-	trace::{PermutationTrace, State},
+	trace::{PermutationTrace, RoundTrace, State},
 };
 use binius_math::{
 	BinarySubspace, multilinear::eq::eq_ind_partial_eval, univariate::lagrange_evals_scalars,
@@ -25,9 +25,9 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use rand::{Rng, SeedableRng, rngs::StdRng};
 
 const KECCAK_BENCH_PERMS: usize = 128;
-const KECCAK_SCALE_BATCH_PERMS: usize = 2048;
 const KECCAK_ROUNDS_PER_PERM: usize = 24;
 const KECCAK_LANES_PER_ROUND: usize = binius_keccak_prove::constants::N_LANES;
+const KECCAK_SCALE_CHUNK_PERMS: usize = 65_536;
 
 fn eval_word_direct(
 	input_domain: &BinarySubspace<AESTowerField8b>,
@@ -218,42 +218,66 @@ fn bench_keccak_first_round_claim_scale(c: &mut Criterion) {
 	let (input_domain, output_domain) = upper_half_domains::<AESTowerField8b>();
 	let lookup = NttLookup::<PackedAESBinaryField16x8b>::new(&input_domain, &output_domain);
 
-	let mut rng = StdRng::seed_from_u64(13);
-	let traces: Vec<_> = (0..KECCAK_SCALE_BATCH_PERMS)
-		.map(|_| PermutationTrace::new(rng.random::<State>()))
-		.collect();
-	let round_traces: Vec<_> = traces.iter().flat_map(|trace| trace.rounds).collect();
-	let small_eq_weights: Vec<_> = (0..round_traces.len() * KECCAK_LANES_PER_ROUND)
-		.map(|_| rng.random::<AESTowerField8b>())
-		.collect();
-	let first_round_challenge = B128::random(&mut rng);
-
 	let mut group = c.benchmark_group("keccak_first_round_claim_scale");
 	group.sample_size(10);
+	group.measurement_time(Duration::from_secs(6));
 
-	for repeat_batches in [1, 2, 4, 8, 16, 32] {
-		let total_perms = KECCAK_SCALE_BATCH_PERMS * repeat_batches;
+	for total_perms in [2048, 4096, 8192, 16384, 32768, 65536, 131072, 196608] {
+		let chunks = scale_chunks(total_perms);
+		let mut rng = StdRng::seed_from_u64(17 + total_perms as u64);
+		let first_round_challenge = B128::random(&mut rng);
 		let total_constraints = total_perms * KECCAK_ROUNDS_PER_PERM * KECCAK_LANES_PER_ROUND;
 		group.throughput(Throughput::Elements(total_constraints as u64));
 		group.bench_function(
-			BenchmarkId::new("first_round_claim_small_par", total_perms),
+			BenchmarkId::new("first_round_claim_small_par_distinct", total_perms),
 			|bench| {
 				bench.iter(|| {
-					let mut claim_sum = B128::ZERO;
-					for _ in 0..repeat_batches {
-						claim_sum +=
-							par_first_round_claim_small_weights::<B128, PackedAESBinaryField16x8b>(
-								&lookup,
-								&round_traces,
-								&small_eq_weights,
-								first_round_challenge,
-							);
+					let mut claim = B128::ZERO;
+					for (round_traces, small_eq_weights) in &chunks {
+						claim += par_first_round_claim_small_weights::<
+							B128,
+							PackedAESBinaryField16x8b,
+						>(
+							&lookup, round_traces, small_eq_weights, first_round_challenge
+						);
 					}
-					black_box(claim_sum)
+					black_box(claim)
 				});
 			},
 		);
 	}
+}
+
+fn scale_chunks(total_perms: usize) -> Vec<(Vec<RoundTrace>, Vec<AESTowerField8b>)> {
+	let mut remaining_perms = total_perms;
+	let mut chunk_idx = 0;
+	let mut chunks = Vec::new();
+
+	while remaining_perms > 0 {
+		let chunk_perms = remaining_perms.min(KECCAK_SCALE_CHUNK_PERMS);
+		chunks.push(scale_chunk(total_perms, chunk_idx, chunk_perms));
+		remaining_perms -= chunk_perms;
+		chunk_idx += 1;
+	}
+
+	chunks
+}
+
+fn scale_chunk(
+	total_perms: usize,
+	chunk_idx: usize,
+	chunk_perms: usize,
+) -> (Vec<RoundTrace>, Vec<AESTowerField8b>) {
+	let mut rng = StdRng::seed_from_u64(13 + total_perms as u64 * 17 + chunk_idx as u64);
+	let mut round_traces = Vec::with_capacity(chunk_perms * KECCAK_ROUNDS_PER_PERM);
+	for _ in 0..chunk_perms {
+		round_traces.extend(PermutationTrace::new(rng.random::<State>()).rounds);
+	}
+	let small_eq_weights = (0..round_traces.len() * KECCAK_LANES_PER_ROUND)
+		.map(|_| rng.random::<AESTowerField8b>())
+		.collect();
+
+	(round_traces, small_eq_weights)
 }
 
 fn bench_production_bitand_round_message_size(c: &mut Criterion, log_num_rows: usize) {

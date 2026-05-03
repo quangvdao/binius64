@@ -5,12 +5,15 @@
 use std::iter;
 
 use binius_field::{BinaryField, Field, PackedField};
-use binius_math::{BinarySubspace, univariate::extrapolate_over_subspace};
+use binius_math::{
+	BinarySubspace,
+	univariate::{extrapolate_over_subspace, lagrange_evals_scalars},
+};
 use binius_utils::rayon::prelude::*;
 
 use crate::{
-	bit_ntt::{NttLookup, upper_half_residual_evals},
-	constants::{LANE_BITS, N_LANES},
+	bit_ntt::{CHI_OPERAND_LANES, NttLookup, upper_half_residual_evals},
+	constants::{LANE_BITS, N_LANES, ROUND_CONSTANTS},
 	trace::RoundTrace,
 };
 
@@ -197,6 +200,64 @@ where
 	next_sum_claim_from_upper_half(&upper_half_message, challenge, &prover_message_domain)
 }
 
+/// Compute the post-first-challenge claim by directly folding each lane word.
+///
+/// This is a correctness-oriented bridge toward the remaining sumcheck rounds. It mirrors the
+/// verifier's view after the first univariate challenge: the 64-bit lane axis has been folded to
+/// the challenge, leaving the outer round/lane indexed relation.
+pub fn folded_next_sum_claim_small_weights<FChallenge, P>(
+	round_traces: &[RoundTrace],
+	eq_weights: &[P::Scalar],
+	challenge: FChallenge,
+) -> FChallenge
+where
+	FChallenge: BinaryField + Field + From<P::Scalar>,
+	P: PackedField,
+	P::Scalar: BinaryField + Field,
+{
+	assert_eq!(eq_weights.len(), round_traces.len() * N_LANES);
+
+	let input_domain = BinarySubspace::<P::Scalar>::with_dim(crate::bit_ntt::LOG_LANE_BITS + 1)
+		.reduce_dim(crate::bit_ntt::LOG_LANE_BITS)
+		.isomorphic::<FChallenge>();
+	let lagrange_evals = lagrange_evals_scalars(&input_domain, challenge);
+
+	let mut claim = FChallenge::ZERO;
+	for (trace_idx, round_trace) in round_traces.iter().enumerate() {
+		let round = trace_idx % crate::constants::N_ROUNDS;
+		let weights = &eq_weights[trace_idx * N_LANES..(trace_idx + 1) * N_LANES];
+		for (lane_idx, &weight) in weights.iter().enumerate() {
+			let (p_lane, q_lane, r_lane) = CHI_OPERAND_LANES[lane_idx];
+			let p = fold_word(!round_trace.pre_chi[p_lane], &lagrange_evals);
+			let q = fold_word(round_trace.pre_chi[q_lane], &lagrange_evals);
+			let r = fold_word(round_trace.pre_chi[r_lane], &lagrange_evals);
+			let next = fold_word(round_trace.output[lane_idx], &lagrange_evals);
+			let iota = fold_word(
+				if lane_idx == 0 {
+					ROUND_CONSTANTS[round]
+				} else {
+					0
+				},
+				&lagrange_evals,
+			);
+			claim += (p * q - r - next - iota) * FChallenge::from(weight);
+		}
+	}
+
+	claim
+}
+
+fn fold_word<F>(word: u64, lagrange_evals: &[F]) -> F
+where
+	F: Field,
+{
+	lagrange_evals
+		.iter()
+		.enumerate()
+		.filter_map(|(bit_idx, &eval)| (((word >> bit_idx) & 1) == 1).then_some(eval))
+		.sum()
+}
+
 fn accumulate_round_trace<FChallenge, P>(
 	lookup: &NttLookup<P>,
 	round_trace: &RoundTrace,
@@ -330,8 +391,7 @@ mod tests {
 	fn first_round_claim_matches_manual_extrapolation() {
 		let mut rng = StdRng::seed_from_u64(15);
 		let lookup = NttLookup::<P>::for_upper_half_domain();
-		let mut trace = PermutationTrace::new(rng.random::<State>());
-		trace.rounds[5].output[0] ^= 0x0101_0101_0101_0101;
+		let trace = PermutationTrace::new(rng.random::<State>());
 
 		let round_traces = round_traces(&trace);
 		let small_weights: Vec<_> = (0..N_ROUNDS * N_LANES)
@@ -354,6 +414,14 @@ mod tests {
 		assert_eq!(
 			par_first_round_claim_small_weights::<B128, P>(
 				&lookup,
+				&round_traces,
+				&small_weights,
+				challenge
+			),
+			next_sum_claim_from_upper_half(&upper_half, challenge, &prover_message_domain)
+		);
+		assert_eq!(
+			folded_next_sum_claim_small_weights::<B128, P>(
 				&round_traces,
 				&small_weights,
 				challenge
