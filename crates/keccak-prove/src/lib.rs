@@ -9,6 +9,7 @@
 
 #![warn(rustdoc::missing_crate_level_docs)]
 
+pub mod bit_ntt;
 pub mod constants;
 pub mod operands;
 pub mod trace;

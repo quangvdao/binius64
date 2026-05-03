@@ -8,5 +8,9 @@ publish = false
 [lints]
 workspace = true
 
+[dependencies]
+binius-field = { path = "../field" }
+binius-math = { path = "../math" }
+
 [dev-dependencies]
 rand = { workspace = true, features = ["thread_rng"] }
