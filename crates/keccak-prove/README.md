@@ -38,6 +38,13 @@ They track three baselines while the prover path is still being assembled:
 - `production_bitand_lookup_precompute`: the existing Binius64 BitAnd lookup setup, using the same domain shape.
 - `production_bitand_reference`: the existing Binius64 BitAnd univariate round-message hot path.
 
+Criterion throughput is reported as constraints processed per iteration:
+
+- one 64-bit lane for word lookup benchmarks;
+- 25 lane constraints per Keccak round residual benchmark;
+- `128 * 24 * 25` lane constraints for the Keccak round-message accumulator;
+- `2^(log_num_rows - 6)` word constraints for the production BitAnd reference.
+
 For broader production comparisons, also run:
 
 ```text

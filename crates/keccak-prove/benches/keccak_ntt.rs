@@ -20,6 +20,10 @@ use binius_verifier::{config::B128, protocols::bitand::SKIPPED_VARS};
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use rand::{Rng, SeedableRng, rngs::StdRng};
 
+const KECCAK_BENCH_PERMS: usize = 128;
+const KECCAK_ROUNDS_PER_PERM: usize = 24;
+const KECCAK_LANES_PER_ROUND: usize = binius_keccak_prove::constants::N_LANES;
+
 fn eval_word_direct(
 	input_domain: &BinarySubspace<AESTowerField8b>,
 	eval_points: &[AESTowerField8b],
@@ -47,8 +51,8 @@ fn bench_ntt_lookup(c: &mut Criterion) {
 	let words: Vec<_> = (0..1024).map(|_| rng.random::<u64>()).collect();
 
 	let mut group = c.benchmark_group("keccak_ntt_lookup");
-	group.throughput(Throughput::Elements(words.len() as u64));
 
+	group.throughput(Throughput::Elements(1));
 	group.bench_function("direct_lagrange_word", |bench| {
 		let mut i = 0;
 		bench.iter(|| {
@@ -58,6 +62,7 @@ fn bench_ntt_lookup(c: &mut Criterion) {
 		});
 	});
 
+	group.throughput(Throughput::Elements(1));
 	group.bench_function("byte_lookup_word", |bench| {
 		let mut i = 0;
 		bench.iter(|| {
@@ -67,12 +72,14 @@ fn bench_ntt_lookup(c: &mut Criterion) {
 		});
 	});
 
+	group.throughput(Throughput::Elements(1));
 	group.bench_function("keccak_lookup_precompute", |bench| {
 		bench.iter(|| {
 			black_box(NttLookup::<PackedAESBinaryField16x8b>::new(&input_domain, &output_domain))
 		});
 	});
 
+	group.throughput(Throughput::Elements(1));
 	group.bench_function("production_bitand_lookup_precompute", |bench| {
 		bench.iter(|| {
 			let prover_message_domain = BinarySubspace::<AESTowerField8b>::with_dim(
@@ -90,18 +97,18 @@ fn bench_keccak_residuals(c: &mut Criterion) {
 	let lookup = NttLookup::<PackedAESBinaryField16x8b>::new(&input_domain, &output_domain);
 
 	let mut rng = StdRng::seed_from_u64(11);
-	let traces: Vec<_> = (0..128)
+	let traces: Vec<_> = (0..KECCAK_BENCH_PERMS)
 		.map(|_| PermutationTrace::new(rng.random::<State>()))
 		.collect();
 	let round_traces: Vec<_> = traces.iter().flat_map(|trace| trace.rounds).collect();
-	let eq_weights: Vec<_> = (0..round_traces.len() * binius_keccak_prove::constants::N_LANES)
+	let eq_weights: Vec<_> = (0..round_traces.len() * KECCAK_LANES_PER_ROUND)
 		.map(|_| B128::from(rng.random::<AESTowerField8b>()))
 		.collect();
 
 	let mut group = c.benchmark_group("keccak_residuals");
-	group.throughput(Throughput::Elements((traces.len() * 24) as u64));
 
 	for rounds_per_iter in [1, 24] {
+		group.throughput(Throughput::Elements((rounds_per_iter * KECCAK_LANES_PER_ROUND) as u64));
 		group.bench_function(
 			BenchmarkId::new("upper_half_residual_evals", rounds_per_iter),
 			|bench| {
@@ -130,6 +137,10 @@ fn bench_keccak_residuals(c: &mut Criterion) {
 		);
 	}
 
+	let accumulator_constraints =
+		KECCAK_BENCH_PERMS * KECCAK_ROUNDS_PER_PERM * KECCAK_LANES_PER_ROUND;
+	assert_eq!(accumulator_constraints, round_traces.len() * KECCAK_LANES_PER_ROUND);
+	group.throughput(Throughput::Elements(accumulator_constraints as u64));
 	group.bench_function("upper_half_round_message_seq/128_perms", |bench| {
 		bench.iter(|| {
 			black_box(upper_half_round_message::<B128, PackedAESBinaryField16x8b>(
@@ -140,6 +151,7 @@ fn bench_keccak_residuals(c: &mut Criterion) {
 		});
 	});
 
+	group.throughput(Throughput::Elements(accumulator_constraints as u64));
 	group.bench_function("upper_half_round_message_par/128_perms", |bench| {
 		bench.iter(|| {
 			black_box(par_upper_half_round_message::<B128, PackedAESBinaryField16x8b>(
@@ -152,7 +164,12 @@ fn bench_keccak_residuals(c: &mut Criterion) {
 }
 
 fn bench_production_bitand_round_message(c: &mut Criterion) {
-	let log_num_rows = 12;
+	for log_num_rows in [12, 22] {
+		bench_production_bitand_round_message_size(c, log_num_rows);
+	}
+}
+
+fn bench_production_bitand_round_message_size(c: &mut Criterion, log_num_rows: usize) {
 	let log_num_words = log_num_rows - SKIPPED_VARS;
 	let mut rng = StdRng::seed_from_u64(12);
 	let small_field_zerocheck_challenges = [
@@ -183,7 +200,11 @@ fn bench_production_bitand_round_message(c: &mut Criterion) {
 	let ntt_lookup =
 		ntt_lookup_from_prover_message_domain::<PackedAESBinaryField16x8b>(prover_message_domain);
 
-	let mut group = c.benchmark_group("production_bitand_reference");
+	let mut group =
+		c.benchmark_group(format!("production_bitand_reference/log_rows={log_num_rows}"));
+	if log_num_rows >= 22 {
+		group.sample_size(10);
+	}
 	group.throughput(Throughput::Elements(1 << log_num_words));
 	group.bench_function(
 		BenchmarkId::new("univariate_round_message_extension_domain", log_num_rows),
