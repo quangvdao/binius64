@@ -44,6 +44,16 @@ What has been implemented so far:
   - chi rows lower `P/Q/C` witness terms to committed `A` and `D` words through virtual `B`;
   - `D` rows are encoded as degenerate AND constraints `0 * 0 = D_correctness_operand`;
   - tests run the production Shift prover/verifier on both Keccak schemas.
+- a full v0 production-path constraint system:
+  - public constants hold the all-one word and 24 iota round constants;
+  - committed private witness holds the locked `A`/`D` layout;
+  - full chi rows prove `(1 + B[x+1,y]) & B[x+2,y] = B[x,y] + A_next[x,y] + iota`;
+  - production `Prover`/`Verifier` tests cover BitAnd, Shift, ring-switching, and PCS end to end.
+- a tensor-shaped v0 row layout with 32 rows per `(permutation, round)`:
+  - 25 chi rows;
+  - 5 `D` correctness rows;
+  - 2 padding rows.
+- a first structured verifier prototype for v0 Shift monster evaluation, checked against the generic Shift verifier evaluator.
 
 Important lessons from the initial implementation:
 
@@ -58,6 +68,8 @@ Important lessons from the initial implementation:
 - The post-skip outer pass uses the MLE-check identity from production Binius, so each remaining round message is tied to the current zerocheck coordinate by `(1 - alpha) r(0) + alpha r(1)`, not by the vanilla `r(0) + r(1)` sumcheck identity.
 - The transcripted segment now links the first-round message to the post-skip MLE-check using the verifier's full row point. The packed small-field path is still useful as a fast benchmark/reference, but it is no longer a correctness restriction for transcript replay.
 - Production Shift reduces BitAnd and IntMul claims through a two-phase protocol: a `g * h` sumcheck over bit/shift variables, followed by a bivariate product against the folded committed witness and the monster multilinear. The Keccak linear-layer pushback should be expressed in that shape. A custom direct claim rewrite over the current `(round_trace, lane)` rows would be a different, less production-faithful design.
+- The full v0 production path is now at least parity with the generic Keccak circuit benchmark at the 128-permutation checkpoint on this machine. This comparison is not the final apples-to-apples story for SHA3/SHAKE wrappers, but it is the right first full-path sanity check because both sides run production proof generation and verification.
+- Verifier specialization needs a real hook into Shift verification. The first tensor evaluator proves the math and is modestly faster at 1,024 permutations, but production verification still calls the generic evaluator. The next useful step is to expose a structured monster-evaluation hook or a v0 verifier path that replaces only `shift::check_eval`.
 
 ## Current Proof Chain
 
@@ -81,7 +93,7 @@ The current v0 chain is committed-round-boundary, not the older serial transpare
    C =     B[x,y] + A_next[x,y] + iota
    ```
 
-3. Convert the final outer evaluations into witness-only Shift claims:
+3. In the custom transcripted segment, convert final outer evaluations into witness-only Shift claims:
    - `P_witness = B[x+1,y]`;
    - `Q_witness = B[x+2,y]`;
    - `C_witness = B[x,y] + A_next[x,y]`;
@@ -102,6 +114,11 @@ The current v0 chain is committed-round-boundary, not the older serial transpare
 6. The remaining integration work is to batch these Shift output claims with the boundary claims on `A_0` and `A_24`, then discharge them through the same ring-switching and PCS opening path used after production Shift.
 
 The older serial GKR-style transparent kernel pushback remains useful as a mathematical guardrail, but it is not the hot implementation path now that `A` and `D` are committed and all round rows can be handled in parallel.
+
+The implemented end-to-end v0 path currently takes the most production-faithful version of this
+chain: build a normal Binius64 `ConstraintSystem` containing full chi rows plus `D` rows, then let
+the production `Prover` run BitAnd, Shift, ring-switching, and PCS. That path is in
+`crates/keccak-prove/src/v0.rs`.
 
 ## Locked-in committed witness layout
 
@@ -241,11 +258,53 @@ cargo bench -p binius-prover --bench and_reduction -- "full zerocheck"
 
 The production BitAnd full-zerocheck benchmark measured approximately **24.8 ms** at `2^27` rows, reported as about **84.5M word constraints/s**. The Keccak post-skip outer pass at 55,924 permutations processes almost exactly one full padded row domain, `55,924 * 24 * 25 = 33.55M` folded lane constraints, in about **264 ms**, or about **126.9M constraints/s**. Just after the next padding cliff, 65,536 permutations processes `39.32M` folded lane constraints in about **524 ms**, or about **75.1M constraints/s**. This says the hot path is now close to production BitAnd; the remaining visible cliff is largely the padded Boolean row domain. It still excludes transcript serialization, verifier replay, linear-layer pushback, and boundary openings.
 
+The first full-path v0 benchmark is:
+
+```text
+cargo bench -p binius-keccak-prove --bench keccak_ntt -- keccak_v0_production_path
+```
+
+At 128 Keccak-f permutations, the v0 production path measured approximately:
+
+| Step | Median time |
+|---|---:|
+| Prove full production path | 56.1 ms |
+| Verify full production path | 2.69 ms |
+
+The matching generic Keccak circuit benchmark command is:
+
+```text
+HASH_MAX_BYTES=17408 LOG_INV_RATE=1 cargo bench -p binius-examples --bench keccak -- keccak_proof
+```
+
+At 17,408 bytes, which corresponds to 128 Keccak-256 rate permutations, the generic path measured approximately:
+
+| Step | Median time |
+|---|---:|
+| Generic Keccak proof generation | 61.1 ms |
+| Generic Keccak proof verification | 2.83 ms |
+
+The first structured verifier microbench is:
+
+```text
+cargo bench -p binius-keccak-prove --bench keccak_ntt -- keccak_v0_structured_verifier
+```
+
+It compares the generic Shift monster matrix evaluation with the v0 tensor evaluator:
+
+| Permutations | Generic | Structured |
+|---:|---:|---:|
+| 128 | 1.71 ms | 2.13 ms |
+| 1,024 | 18.2 ms | 17.1 ms |
+
+The structured evaluator is therefore not a universal drop-in win yet, but it validates the tensor
+approach and starts to win at larger batches.
+
 ## Next steps
 
-The next implementation milestone is to connect the transcripted chi/iota segment to the locked-in committed-witness path:
+The next implementation milestone is verifier/prover specialization on top of the full v0 path:
 
-1. Wire the transcripted chi/iota outer output directly into `witness_only_chi_evals` and the chi Shift schema.
-2. Batch chi Shift output, `D`-correctness Shift output, and boundary `A_0/A_24` claims into one opening plan.
-3. Integrate that opening plan with the production ring-switching and PCS opening path.
-4. Add an end-to-end benchmark against the generic `binius-examples` Keccak circuit path, while keeping the current microbenches as regression tripwires.
+1. Expose a production Shift verification hook so v0 can replace generic monster evaluation with the structured tensor evaluator.
+2. Continue optimizing the structured evaluator so it wins at 128 permutations, not only at larger batches.
+3. Add a v0 setup/key-building benchmark, because generic `KeyCollection` construction is likely avoidable from the 32-slot tensor schema.
+4. Scale the full-path comparison beyond 128 permutations and keep matching against `binius-examples` Keccak at equivalent rate-permutation counts.

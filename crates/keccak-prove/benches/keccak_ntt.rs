@@ -2,7 +2,7 @@
 
 use std::{hint::black_box, time::Duration};
 
-use binius_core::word::Word;
+use binius_core::{constraint_system::Operand, word::Word};
 use binius_field::{AESTowerField8b, Field, PackedAESBinaryField16x8b, Random};
 use binius_keccak_prove::{
 	bit_ntt::{NttLookup, upper_half_domains, upper_half_residual_evals},
@@ -13,15 +13,29 @@ use binius_keccak_prove::{
 		upper_half_round_message_small_weights,
 	},
 	trace::{PermutationTrace, RoundTrace, State},
+	v0,
 };
 use binius_math::{
 	BinarySubspace, multilinear::eq::eq_ind_partial_eval, univariate::lagrange_evals_scalars,
 };
-use binius_prover::and_reduction::{
-	prover_setup::ntt_lookup_from_prover_message_domain,
-	sumcheck_round_messages::univariate_round_message_extension_domain,
+use binius_prover::{
+	OptimalPackedB128, Prover,
+	and_reduction::{
+		prover_setup::ntt_lookup_from_prover_message_domain,
+		sumcheck_round_messages::univariate_round_message_extension_domain,
+	},
+	hash::parallel_compression::ParallelCompressionAdaptor,
 };
-use binius_verifier::{config::B128, protocols::bitand::SKIPPED_VARS};
+use binius_transcript::ProverTranscript;
+use binius_verifier::{
+	Verifier,
+	config::{B128, LOG_WORD_SIZE_BITS, StdChallenger},
+	hash::{StdCompression, StdDigest},
+	protocols::{
+		bitand::SKIPPED_VARS,
+		shift::{OperatorData as VerifierOperatorData, evaluate_monster_multilinear_for_operation},
+	},
+};
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use rand::{Rng, SeedableRng, rngs::StdRng};
 
@@ -212,6 +226,150 @@ fn bench_keccak_residuals(c: &mut Criterion) {
 fn bench_production_bitand_round_message(c: &mut Criterion) {
 	for log_num_rows in [12, 22] {
 		bench_production_bitand_round_message_size(c, log_num_rows);
+	}
+}
+
+fn bench_keccak_v0_production_path(c: &mut Criterion) {
+	let mut group = c.benchmark_group("keccak_v0_production_path");
+	group.sample_size(10);
+	group.measurement_time(Duration::from_secs(6));
+
+	for n_permutations in [1, 16, 128] {
+		let mut rng = StdRng::seed_from_u64(20 + n_permutations as u64);
+		let traces: Vec<_> = (0..n_permutations)
+			.map(|_| PermutationTrace::new(rng.random::<State>()))
+			.collect();
+		let witness = binius_keccak_prove::witness::CommittedKeccakWitness::from_traces(&traces);
+		let constraint_system = v0::constraint_system(n_permutations);
+		let value_vec = v0::value_vec(&witness);
+		let verifier =
+			Verifier::<StdDigest, _>::setup(constraint_system, 1, StdCompression::default())
+				.unwrap();
+		let prover = Prover::<OptimalPackedB128, _, StdDigest>::setup(
+			verifier.clone(),
+			ParallelCompressionAdaptor::new(StdCompression::default()),
+		)
+		.unwrap();
+
+		let mut proof_transcript = ProverTranscript::new(StdChallenger::default());
+		prover
+			.prove(value_vec.clone(), &mut proof_transcript)
+			.unwrap();
+		let proof = proof_transcript.finalize();
+		let constraint_rows =
+			n_permutations * KECCAK_ROUNDS_PER_PERM * (KECCAK_LANES_PER_ROUND + 5);
+
+		group.throughput(Throughput::Elements(constraint_rows as u64));
+		group.bench_function(
+			BenchmarkId::new("prove_full_production_path", n_permutations),
+			|bench| {
+				bench.iter(|| {
+					let mut prover_transcript = ProverTranscript::new(StdChallenger::default());
+					prover
+						.prove(value_vec.clone(), &mut prover_transcript)
+						.unwrap();
+					black_box(prover_transcript)
+				});
+			},
+		);
+
+		group.throughput(Throughput::Elements(constraint_rows as u64));
+		group.bench_function(
+			BenchmarkId::new("verify_full_production_path", n_permutations),
+			|bench| {
+				bench.iter(|| {
+					let mut verifier_transcript = binius_transcript::VerifierTranscript::new(
+						StdChallenger::default(),
+						proof.clone(),
+					);
+					verifier
+						.verify(value_vec.public(), &mut verifier_transcript)
+						.unwrap();
+					black_box(verifier_transcript.finalize().unwrap())
+				});
+			},
+		);
+	}
+}
+
+fn bench_keccak_v0_structured_verifier(c: &mut Criterion) {
+	let mut group = c.benchmark_group("keccak_v0_structured_verifier");
+	group.sample_size(10);
+
+	for n_permutations in [128, 1024] {
+		let mut rng = StdRng::seed_from_u64(21 + n_permutations as u64);
+		let constraint_system = v0::constraint_system(n_permutations);
+		let subspace = BinarySubspace::<B128>::with_dim(LOG_WORD_SIZE_BITS);
+		let operator_data = VerifierOperatorData::new(
+			B128::random(&mut rng),
+			(0..constraint_system.and_constraints.len().ilog2())
+				.map(|_| B128::random(&mut rng))
+				.collect(),
+			std::array::from_fn(|_| B128::random(&mut rng)),
+		);
+		let lambda = B128::random(&mut rng);
+		let r_j = (0..LOG_WORD_SIZE_BITS)
+			.map(|_| B128::random(&mut rng))
+			.collect::<Vec<_>>();
+		let r_s = (0..LOG_WORD_SIZE_BITS)
+			.map(|_| B128::random(&mut rng))
+			.collect::<Vec<_>>();
+		let r_y = (0..constraint_system
+			.value_vec_layout
+			.committed_total_len
+			.ilog2())
+			.map(|_| B128::random(&mut rng))
+			.collect::<Vec<_>>();
+
+		let mut a = Vec::<&Operand>::with_capacity(constraint_system.and_constraints.len());
+		let mut b = Vec::<&Operand>::with_capacity(constraint_system.and_constraints.len());
+		let mut c = Vec::<&Operand>::with_capacity(constraint_system.and_constraints.len());
+		for constraint in &constraint_system.and_constraints {
+			a.push(&constraint.a);
+			b.push(&constraint.b);
+			c.push(&constraint.c);
+		}
+		let operand_vecs = [a, b, c];
+		let constraint_rows =
+			n_permutations * KECCAK_ROUNDS_PER_PERM * (KECCAK_LANES_PER_ROUND + 5);
+		group.throughput(Throughput::Elements(constraint_rows as u64));
+
+		group.bench_function(
+			BenchmarkId::new("generic_shift_monster_eval", n_permutations),
+			|bench| {
+				bench.iter(|| {
+					black_box(
+						evaluate_monster_multilinear_for_operation(
+							&operand_vecs,
+							&operator_data,
+							&subspace,
+							lambda,
+							&r_j,
+							&r_s,
+							&r_y,
+						)
+						.unwrap(),
+					)
+				});
+			},
+		);
+
+		group.bench_function(
+			BenchmarkId::new("structured_shift_monster_eval", n_permutations),
+			|bench| {
+				bench.iter(|| {
+					black_box(v0::structured_bitand_monster_eval(
+						n_permutations,
+						&operator_data,
+						&subspace,
+						lambda,
+						&r_j,
+						&r_s,
+						&r_y,
+					))
+				});
+			},
+		);
 	}
 }
 
@@ -453,6 +611,8 @@ criterion_group!(
 	bench_keccak_first_round_claim_scale,
 	bench_keccak_spartan_outer,
 	bench_keccak_spartan_outer_scale,
+	bench_keccak_v0_production_path,
+	bench_keccak_v0_structured_verifier,
 	bench_production_bitand_round_message
 );
 criterion_main!(keccak_ntt);

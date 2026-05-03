@@ -26,6 +26,19 @@ implementation plan. The current chain is:
 6. batch the resulting witness-evaluation claims with the boundary claims and discharge them
    through the production opening path.
 
+The implemented v0 path currently realizes this through a normal production `ConstraintSystem` in
+`crates/keccak-prove/src/v0.rs`. The row layout is intentionally tensor-shaped:
+
+```text
+per permutation, per round:
+  slots 0..24   chi rows
+  slots 25..29  D correctness rows
+  slots 30..31  padding rows
+```
+
+This mirrors the committed witness block shape and gives a future verifier a structured matrix
+evaluation problem instead of an arbitrary list of shifted operands.
+
 ## 1. Keccak state notation
 
 We use the same lane coordinates as `canvas/keccak-shake-permutation.canvas.tsx`.

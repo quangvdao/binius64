@@ -15,11 +15,11 @@ binius-ip = { path = "../ip" }
 binius-ip-prover = { path = "../ip-prover" }
 binius-math = { path = "../math" }
 binius-utils = { path = "../utils" }
+binius-verifier = { path = "../verifier" }
 
 [dev-dependencies]
 binius-prover = { path = "../prover" }
 binius-transcript = { path = "../transcript" }
-binius-verifier = { path = "../verifier" }
 criterion.workspace = true
 rand = { workspace = true, features = ["thread_rng"] }
 sha2.workspace = true

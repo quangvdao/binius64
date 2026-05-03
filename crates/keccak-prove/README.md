@@ -37,6 +37,12 @@ Current implementation chain:
 - witness-only chi `P/Q/C` claims lowered through virtual `B` operands into committed `A`/`D`;
 - `D` correctness encoded as degenerate AND rows;
 - production Shift prover/verifier tests for both Keccak schemas.
+- `v0` production path builds a normal Binius64 `ConstraintSystem` with public all-one/iota
+  constants, proves it with the production `Prover`, and verifies through BitAnd, Shift,
+  ring-switching, and PCS.
+- v0 constraint rows are laid out as 32 slots per `(permutation, round)`:
+  25 chi rows, 5 `D` correctness rows, and 2 padding rows. This keeps the row space tensor-shaped
+  for verifier specialization without changing the current power-of-two proving cliffs.
 
 They track three baselines while the prover path is still being assembled:
 
@@ -50,6 +56,9 @@ They track three baselines while the prover path is still being assembled:
 - `keccak_spartan_outer_scale`: a distinct-data batch sweep up to 65,536 permutations to track where the post-skip outer pass crosses roughly 500 ms.
 - `production_bitand_lookup_precompute`: the existing Binius64 BitAnd lookup setup, using the same domain shape.
 - `production_bitand_reference`: the existing Binius64 BitAnd univariate round-message hot path.
+- `keccak_v0_production_path`: the end-to-end v0 production proof and verifier path.
+- `keccak_v0_structured_verifier`: generic Shift monster evaluation versus the first
+  tensor-structured Keccak verifier prototype.
 
 Criterion throughput is reported as constraints processed per iteration:
 
@@ -98,3 +107,20 @@ cargo bench -p binius-examples --bench keccak
 ```
 
 The first is the optimized BitAnd outer-reduction path we are adapting. The second is the current generic Keccak circuit proving baseline.
+
+Current full-path checkpoint on this machine:
+
+```text
+cargo bench -p binius-keccak-prove --bench keccak_ntt -- keccak_v0_production_path
+HASH_MAX_BYTES=17408 LOG_INV_RATE=1 cargo bench -p binius-examples --bench keccak -- keccak_proof
+```
+
+For 128 Keccak-f permutations, v0 measured about 56.1 ms median proving time and 2.69 ms
+verification time. The generic Keccak circuit benchmark at the matching 17,408-byte workload
+measured about 61.1 ms proving time and 2.83 ms verification time.
+
+The first structured verifier prototype is correctness-checked against the generic Shift verifier
+matrix evaluation. It is not yet wired into the production verifier, but as a microbench it measured
+about 17.1 ms versus 18.2 ms for generic Shift monster evaluation at 1,024 permutations. At 128
+permutations it is still slower than the generic prebuilt-operand microbench, so the next verifier
+step is a production hook plus more tensor-specific accumulation rather than dropping it in blindly.

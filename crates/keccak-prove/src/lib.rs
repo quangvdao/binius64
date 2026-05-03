@@ -18,4 +18,5 @@ pub mod shift_claims;
 pub mod shift_operands;
 pub mod trace;
 pub mod unrolled;
+pub mod v0;
 pub mod witness;
