@@ -244,3 +244,80 @@ fn repeated_keccak_verifier_print_runtimes() {
 		);
 	}
 }
+
+#[test]
+#[ignore = "prints flat vs repeated prover setup/key/prove runtimes for repeated Keccak"]
+fn repeated_keccak_prover_key_materialization_print_runtimes() {
+	println!(
+		"Keccak prover timing with flat Shift keys for every instance vs compact repeated Shift keys for the base circuit."
+	);
+	println!(
+		"log_instances,instances,flat_key_words,repeated_key_words,flat_keys,repeated_keys,flat_setup_ms,repeated_setup_ms,flat_repeated_prove_ms,compact_repeated_prove_ms"
+	);
+
+	for log_instances in [0usize, 1, 2, 4] {
+		let (repeated, flat_constraint_system, flat_value_vec) =
+			repeated_keccak_fixture(log_instances);
+		verify_constraints(&flat_constraint_system, &flat_value_vec)
+			.expect("flattened repeated Keccak witness satisfies the expanded circuit");
+
+		let verifier = Verifier::<StdDigest, _>::setup_repeated(
+			&repeated,
+			LOG_INV_RATE,
+			StdCompression::default(),
+		)
+		.expect("repeated verifier setup succeeds");
+
+		let (flat_prover, flat_setup_elapsed) = elapsed_for(|| {
+			Prover::<OptimalPackedB128, _, StdDigest>::setup(
+				verifier.clone(),
+				ParallelCompressionAdaptor::new(StdCompression::default()),
+			)
+			.expect("flat Keccak prover setup succeeds")
+		});
+		let (repeated_prover, repeated_setup_elapsed) = elapsed_for(|| {
+			Prover::<OptimalPackedB128, _, StdDigest>::setup_repeated(
+				verifier.clone(),
+				ParallelCompressionAdaptor::new(StdCompression::default()),
+				repeated.clone(),
+			)
+			.expect("repeated Keccak prover setup succeeds")
+		});
+
+		let (_, flat_repeated_prove_elapsed) = elapsed_for(|| {
+			let mut prover_transcript = ProverTranscript::new(StdChallenger::default());
+			flat_prover
+				.prove_repeated(&repeated, flat_value_vec.clone(), &mut prover_transcript)
+				.expect("flat-key repeated Keccak prover succeeds");
+			prover_transcript
+		});
+		let (compact_transcript, compact_repeated_prove_elapsed) = elapsed_for(|| {
+			let mut prover_transcript = ProverTranscript::new(StdChallenger::default());
+			repeated_prover
+				.prove_repeated(&repeated, flat_value_vec.clone(), &mut prover_transcript)
+				.expect("compact repeated Keccak prover succeeds");
+			prover_transcript
+		});
+
+		let mut verifier_transcript = compact_transcript.into_verifier();
+		verifier
+			.verify_repeated(flat_value_vec.public(), &repeated, &mut verifier_transcript)
+			.expect("repeated Keccak verifier accepts compact-key proof");
+		verifier_transcript
+			.finalize()
+			.expect("compact repeated Keccak transcript is exhausted");
+
+		println!(
+			"{log_instances},{},{},{},{},{},{:.3},{:.3},{:.3},{:.3}",
+			1usize << log_instances,
+			flat_prover.key_collection().key_ranges.len(),
+			repeated_prover.key_collection().key_ranges.len(),
+			flat_prover.key_collection().keys.len(),
+			repeated_prover.key_collection().keys.len(),
+			flat_setup_elapsed.as_secs_f64() * 1_000.0,
+			repeated_setup_elapsed.as_secs_f64() * 1_000.0,
+			flat_repeated_prove_elapsed.as_secs_f64() * 1_000.0,
+			compact_repeated_prove_elapsed.as_secs_f64() * 1_000.0,
+		);
+	}
+}
