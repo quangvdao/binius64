@@ -5,10 +5,10 @@ use std::time::{Duration, Instant};
 use binius_circuits::mldsa::{
 	Mldsa44, Mldsa65, Mldsa87, MldsaParams, assert_hint_canonical_matches_expanded_for,
 	assert_z_packed_bytes_norm_for, encode_w1_for, final_challenge_hash_for,
-	full_bit_heavy_one_block_canonical_hint_matched_relation_for,
-	full_bit_heavy_one_block_relation_for, mldsa44, mldsa65, mldsa87,
-	sample_in_ball_one_block_from_stream_for, sample_in_ball_one_block_sparse_from_stream_for,
-	sample_in_ball_one_block_stream_for, use_hint_coeff_for,
+	full_bit_heavy_fixed_cap_canonical_hint_matched_relation_for,
+	full_bit_heavy_fixed_cap_relation_for, mldsa44, mldsa65, mldsa87,
+	sample_in_ball_fixed_cap_from_stream_for, sample_in_ball_fixed_cap_sparse_from_stream_for,
+	sample_in_ball_fixed_cap_stream_for, use_hint_coeff_for,
 };
 use binius_core::{constraint_system::ValueVec, word::Word};
 use binius_field::arch::OptimalPackedB128;
@@ -77,6 +77,19 @@ struct MldsaProofMetrics {
 	prove: Duration,
 	verify: Duration,
 	proof_size_bytes: usize,
+}
+
+#[derive(Clone, Copy)]
+struct ComponentStat {
+	name: &'static str,
+	n_gates: usize,
+	n_evaluations: usize,
+	n_and_constraints: usize,
+	n_mul_constraints: usize,
+	n_inout: usize,
+	n_private: usize,
+	total_committed: usize,
+	scratch: usize,
 }
 
 fn timed<T>(f: impl FnOnce() -> T) -> Timed<T> {
@@ -213,10 +226,10 @@ fn host_use_hint_for<P: MldsaParams>(h: u64, r: u64) -> u64 {
 	}
 }
 
-fn host_sample_in_ball_one_block_for<P: MldsaParams>(
+fn host_sample_in_ball_fixed_cap_for<P: MldsaParams>(
 	stream: &[u8],
 ) -> Option<(Vec<u64>, Vec<u64>)> {
-	assert_eq!(stream.len(), P::SAMPLE_IN_BALL_ONE_BLOCK_STREAM_BYTES);
+	assert_eq!(stream.len(), P::SAMPLE_IN_BALL_STREAM_BYTES);
 
 	let mut signs = u64::from_le_bytes(stream[..8].try_into().unwrap());
 	let mut draw_cursor = P::SAMPLE_IN_BALL_SIGN_BYTES;
@@ -264,7 +277,7 @@ fn build_circuit_for<P: MldsaParams>(kind: MldsaCircuitKind) -> MldsaMeasurement
 		.collect();
 
 	let relation = match kind {
-		MldsaCircuitKind::ExpandedHint => full_bit_heavy_one_block_relation_for::<P>(
+		MldsaCircuitKind::ExpandedHint => full_bit_heavy_fixed_cap_relation_for::<P>(
 			&builder,
 			&c_tilde,
 			&z_words,
@@ -273,7 +286,7 @@ fn build_circuit_for<P: MldsaParams>(kind: MldsaCircuitKind) -> MldsaMeasurement
 			&w_approx_coeffs,
 		),
 		MldsaCircuitKind::CanonicalMatchedHint => {
-			full_bit_heavy_one_block_canonical_hint_matched_relation_for::<P>(
+			full_bit_heavy_fixed_cap_canonical_hint_matched_relation_for::<P>(
 				&builder,
 				&c_tilde,
 				&z_words,
@@ -352,8 +365,8 @@ fn make_valid_witness_for<P: MldsaParams>() -> MldsaMeasurementWitness {
 		assert_eq!(final_hash_input.len(), P::FINAL_CHALLENGE_INPUT_BYTES);
 
 		let c_tilde = shake256(&final_hash_input, P::C_TILDE_BYTES);
-		let sample_stream = shake256(&c_tilde, P::SAMPLE_IN_BALL_ONE_BLOCK_STREAM_BYTES);
-		if let Some((_coeffs, draw_counts)) = host_sample_in_ball_one_block_for::<P>(&sample_stream)
+		let sample_stream = shake256(&c_tilde, P::SAMPLE_IN_BALL_STREAM_BYTES);
+		if let Some((_coeffs, draw_counts)) = host_sample_in_ball_fixed_cap_for::<P>(&sample_stream)
 		{
 			return MldsaMeasurementWitness {
 				c_tilde_words: words_from_bytes(&c_tilde),
@@ -367,7 +380,7 @@ fn make_valid_witness_for<P: MldsaParams>() -> MldsaMeasurementWitness {
 		}
 	}
 
-	panic!("failed to find a one-block SampleInBall witness for {}", P::label());
+	panic!("failed to find a fixed-cap SampleInBall witness for {}", P::label());
 }
 
 fn populate_witness(
@@ -491,6 +504,213 @@ fn print_metrics(name: &str, metrics: &MldsaProofMetrics) {
 	);
 }
 
+fn duration_ms(duration: Duration) -> f64 {
+	duration.as_secs_f64() * 1000.0
+}
+
+fn percentile_duration(
+	mut values: Vec<Duration>,
+	numerator: usize,
+	denominator: usize,
+) -> Duration {
+	assert!(!values.is_empty());
+	values.sort_unstable();
+	let idx = ((values.len() - 1) * numerator).div_ceil(denominator);
+	values[idx]
+}
+
+fn print_repeated_metrics(name: &str, metrics: &[MldsaProofMetrics]) {
+	assert!(!metrics.is_empty());
+	let proof_sizes: Vec<_> = metrics
+		.iter()
+		.map(|metric| metric.proof_size_bytes)
+		.collect();
+	let all_same_proof_size = proof_sizes.iter().all(|&size| size == proof_sizes[0]);
+	println!("{name} repeated proof metrics over {} runs:", metrics.len());
+	for (label, values) in [
+		(
+			"circuit_build_ms",
+			metrics
+				.iter()
+				.map(|metric| metric.circuit_build)
+				.collect::<Vec<_>>(),
+		),
+		(
+			"witness_generation_ms",
+			metrics
+				.iter()
+				.map(|metric| metric.witness_generation)
+				.collect::<Vec<_>>(),
+		),
+		(
+			"verifier_setup_ms",
+			metrics
+				.iter()
+				.map(|metric| metric.verifier_setup)
+				.collect::<Vec<_>>(),
+		),
+		(
+			"prover_setup_ms",
+			metrics
+				.iter()
+				.map(|metric| metric.prover_setup)
+				.collect::<Vec<_>>(),
+		),
+		(
+			"prove_ms",
+			metrics
+				.iter()
+				.map(|metric| metric.prove)
+				.collect::<Vec<_>>(),
+		),
+		(
+			"verify_ms",
+			metrics
+				.iter()
+				.map(|metric| metric.verify)
+				.collect::<Vec<_>>(),
+		),
+	] {
+		let median = percentile_duration(values.clone(), 1, 2);
+		let p95 = percentile_duration(values, 95, 100);
+		println!("  {label}: median={:.3}, p95={:.3}", duration_ms(median), duration_ms(p95));
+	}
+	println!(
+		"  proof_size_bytes: {}{}",
+		proof_sizes[0],
+		if all_same_proof_size {
+			""
+		} else {
+			" (varied across runs)"
+		}
+	);
+}
+
+fn component_stat(name: &'static str, build: impl FnOnce(&CircuitBuilder)) -> ComponentStat {
+	let builder = CircuitBuilder::new();
+	build(&builder);
+	let circuit = builder.build();
+	let stat = CircuitStat::collect(&circuit);
+	ComponentStat {
+		name,
+		n_gates: stat.n_gates,
+		n_evaluations: stat.n_eval_insn,
+		n_and_constraints: stat.n_and_constraints,
+		n_mul_constraints: stat.n_mul_constraints,
+		n_inout: stat.n_inout,
+		n_private: stat.n_witness,
+		total_committed: stat.value_vec_len,
+		scratch: stat.n_scratch,
+	}
+}
+
+fn component_stats_for<P: MldsaParams>() -> Vec<ComponentStat> {
+	vec![
+		component_stat("z_packed_decode_and_norm", |builder| {
+			let z_words: Vec<_> = (0..P::Z_PACKED_WORDS)
+				.map(|_| builder.add_witness())
+				.collect();
+			assert_z_packed_bytes_norm_for::<P>(builder, &z_words);
+		}),
+		component_stat("hint_canonical_matches_expanded", |builder| {
+			let h_words: Vec<_> = (0..P::HINT_WORDS).map(|_| builder.add_witness()).collect();
+			let h_coeffs: Vec<_> = (0..P::W1_COEFFICIENTS)
+				.map(|_| builder.add_witness())
+				.collect();
+			assert_hint_canonical_matches_expanded_for::<P>(builder, &h_words, &h_coeffs);
+		}),
+		component_stat("use_hint_no_weight_check", |builder| {
+			let h_coeffs: Vec<_> = (0..P::W1_COEFFICIENTS)
+				.map(|_| builder.add_witness())
+				.collect();
+			let w_approx_coeffs: Vec<_> = (0..P::W1_COEFFICIENTS)
+				.map(|_| builder.add_witness())
+				.collect();
+			for (&h, &r) in h_coeffs.iter().zip(w_approx_coeffs.iter()) {
+				use_hint_coeff_for::<P>(builder, h, r);
+			}
+		}),
+		component_stat("w1_encode", |builder| {
+			let w1_coeffs: Vec<_> = (0..P::W1_COEFFICIENTS)
+				.map(|_| builder.add_witness())
+				.collect();
+			encode_w1_for::<P>(builder, &w1_coeffs);
+		}),
+		component_stat("final_challenge_shake256", |builder| {
+			let input_words: Vec<_> = (0..P::FINAL_CHALLENGE_INPUT_WORDS)
+				.map(|_| builder.add_witness())
+				.collect();
+			final_challenge_hash_for::<P>(builder, &input_words);
+		}),
+		component_stat("sample_in_ball_shake256", |builder| {
+			let c_tilde: Vec<_> = (0..P::C_TILDE_BYTES / 8)
+				.map(|_| builder.add_witness())
+				.collect();
+			sample_in_ball_fixed_cap_stream_for::<P>(builder, &c_tilde);
+		}),
+		component_stat("sample_in_ball_rejection_dense", |builder| {
+			let stream: Vec<_> = (0..P::SAMPLE_IN_BALL_STREAM_BYTES.div_ceil(8))
+				.map(|_| builder.add_witness())
+				.collect();
+			sample_in_ball_fixed_cap_from_stream_for::<P>(builder, &stream);
+		}),
+		component_stat("sample_in_ball_rejection_sparse", |builder| {
+			let stream: Vec<_> = (0..P::SAMPLE_IN_BALL_STREAM_BYTES.div_ceil(8))
+				.map(|_| builder.add_witness())
+				.collect();
+			sample_in_ball_fixed_cap_sparse_from_stream_for::<P>(builder, &stream);
+		}),
+		component_stat("full_canonical_matched_fixed_cap", |builder| {
+			let c_tilde: Vec<_> = (0..P::C_TILDE_BYTES / 8)
+				.map(|_| builder.add_witness())
+				.collect();
+			let z_words: Vec<_> = (0..P::Z_PACKED_WORDS)
+				.map(|_| builder.add_witness())
+				.collect();
+			let h_words: Vec<_> = (0..P::HINT_WORDS).map(|_| builder.add_witness()).collect();
+			let h_coeffs: Vec<_> = (0..P::W1_COEFFICIENTS)
+				.map(|_| builder.add_witness())
+				.collect();
+			let mu_words: Vec<_> = (0..P::MU_WORDS).map(|_| builder.add_inout()).collect();
+			let w_approx_coeffs: Vec<_> = (0..P::W1_COEFFICIENTS)
+				.map(|_| builder.add_witness())
+				.collect();
+			full_bit_heavy_fixed_cap_canonical_hint_matched_relation_for::<P>(
+				builder,
+				&c_tilde,
+				&z_words,
+				&h_words,
+				&h_coeffs,
+				&mu_words,
+				&w_approx_coeffs,
+			);
+		}),
+	]
+}
+
+fn print_component_breakdown_for<P: MldsaParams>() {
+	let stats = component_stats_for::<P>();
+	println!("{} component breakdown:", P::label());
+	println!(
+		"| component | gates | evaluations | AND | MUL | public | private | committed | scratch |"
+	);
+	println!("|---|---:|---:|---:|---:|---:|---:|---:|---:|");
+	for stat in stats {
+		println!(
+			"| {} | {} | {} | {} | {} | {} | {} | {} | {} |",
+			stat.name,
+			stat.n_gates,
+			stat.n_evaluations,
+			stat.n_and_constraints,
+			stat.n_mul_constraints,
+			stat.n_inout,
+			stat.n_private,
+			stat.total_committed,
+			stat.scratch,
+		);
+	}
+}
+
 fn print_circuit_stats(name: &str, build: impl FnOnce(&CircuitBuilder)) {
 	let builder = CircuitBuilder::new();
 	build(&builder);
@@ -551,22 +771,30 @@ fn mldsa44_constraint_breakdown() {
 		let c_tilde: Vec<_> = (0..mldsa44::C_TILDE_BYTES / 8)
 			.map(|_| builder.add_witness())
 			.collect();
-		sample_in_ball_one_block_stream_for::<Mldsa44>(builder, &c_tilde);
+		sample_in_ball_fixed_cap_stream_for::<Mldsa44>(builder, &c_tilde);
 	});
 
 	print_circuit_stats("sample_in_ball_rejection_only", |builder| {
-		let stream: Vec<_> = (0..mldsa44::SAMPLE_IN_BALL_ONE_BLOCK_STREAM_BYTES / 8)
+		let stream: Vec<_> = (0..mldsa44::SAMPLE_IN_BALL_STREAM_BYTES.div_ceil(8))
 			.map(|_| builder.add_witness())
 			.collect();
-		sample_in_ball_one_block_from_stream_for::<Mldsa44>(builder, &stream);
+		sample_in_ball_fixed_cap_from_stream_for::<Mldsa44>(builder, &stream);
 	});
 
 	print_circuit_stats("sample_in_ball_sparse_rejection_only", |builder| {
-		let stream: Vec<_> = (0..mldsa44::SAMPLE_IN_BALL_ONE_BLOCK_STREAM_BYTES / 8)
+		let stream: Vec<_> = (0..mldsa44::SAMPLE_IN_BALL_STREAM_BYTES.div_ceil(8))
 			.map(|_| builder.add_witness())
 			.collect();
-		sample_in_ball_one_block_sparse_from_stream_for::<Mldsa44>(builder, &stream);
+		sample_in_ball_fixed_cap_sparse_from_stream_for::<Mldsa44>(builder, &stream);
 	});
+}
+
+#[test]
+#[ignore = "stats-only circuit component breakdown for all parameter sets"]
+fn mldsa_variant_constraint_breakdown() {
+	print_component_breakdown_for::<Mldsa44>();
+	print_component_breakdown_for::<Mldsa65>();
+	print_component_breakdown_for::<Mldsa87>();
 }
 
 #[test]
@@ -614,4 +842,25 @@ fn measure_mldsa65_canonical_matched_proof() {
 fn measure_mldsa87_canonical_matched_proof() {
 	let metrics = prove_and_measure_for::<Mldsa87>(MldsaCircuitKind::CanonicalMatchedHint);
 	print_metrics("mldsa87_canonical_matched_hint", &metrics);
+}
+
+#[test]
+#[ignore = "expensive repeated end-to-end proof measurement"]
+fn measure_mldsa_variants_canonical_matched_proof_repeated() {
+	const RUNS: usize = 7;
+
+	let metrics44: Vec<_> = (0..RUNS)
+		.map(|_| prove_and_measure_for::<Mldsa44>(MldsaCircuitKind::CanonicalMatchedHint))
+		.collect();
+	print_repeated_metrics("mldsa44_canonical_matched_hint", &metrics44);
+
+	let metrics65: Vec<_> = (0..RUNS)
+		.map(|_| prove_and_measure_for::<Mldsa65>(MldsaCircuitKind::CanonicalMatchedHint))
+		.collect();
+	print_repeated_metrics("mldsa65_canonical_matched_hint", &metrics65);
+
+	let metrics87: Vec<_> = (0..RUNS)
+		.map(|_| prove_and_measure_for::<Mldsa87>(MldsaCircuitKind::CanonicalMatchedHint))
+		.collect();
+	print_repeated_metrics("mldsa87_canonical_matched_hint", &metrics87);
 }

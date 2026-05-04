@@ -147,10 +147,10 @@ fn verify_mldsa44_z_packed_bytes_norm_witness(packed_y_coeff_values: &[u64]) -> 
 	verify_constraints(cs, &witness.into_value_vec()).is_ok()
 }
 
-fn host_sample_in_ball_one_block(
+fn host_sample_in_ball_fixed_cap(
 	stream: &[u8],
 ) -> Option<([u64; mldsa44::N], [u64; mldsa44::TAU])> {
-	assert_eq!(stream.len(), mldsa44::SAMPLE_IN_BALL_ONE_BLOCK_STREAM_BYTES);
+	assert_eq!(stream.len(), mldsa44::SAMPLE_IN_BALL_STREAM_BYTES);
 
 	let mut signs = u64::from_le_bytes(stream[..8].try_into().unwrap());
 	let mut draw_cursor = mldsa44::SAMPLE_IN_BALL_SIGN_BYTES;
@@ -180,8 +180,8 @@ fn host_sample_in_ball_one_block(
 	Some((coeffs, draw_counts))
 }
 
-fn deterministic_sample_in_ball_stream() -> [u8; mldsa44::SAMPLE_IN_BALL_ONE_BLOCK_STREAM_BYTES] {
-	let mut stream = [0u8; mldsa44::SAMPLE_IN_BALL_ONE_BLOCK_STREAM_BYTES];
+fn deterministic_sample_in_ball_stream() -> [u8; mldsa44::SAMPLE_IN_BALL_STREAM_BYTES] {
+	let mut stream = [0u8; mldsa44::SAMPLE_IN_BALL_STREAM_BYTES];
 	stream[..8].copy_from_slice(&0x0000_0055_AA55_33CCu64.to_le_bytes());
 
 	let mut pos = mldsa44::SAMPLE_IN_BALL_SIGN_BYTES;
@@ -198,7 +198,7 @@ fn deterministic_sample_in_ball_stream() -> [u8; mldsa44::SAMPLE_IN_BALL_ONE_BLO
 }
 
 fn verify_mldsa44_sample_in_ball_stream_witness(
-	stream: &[u8; mldsa44::SAMPLE_IN_BALL_ONE_BLOCK_STREAM_BYTES],
+	stream: &[u8; mldsa44::SAMPLE_IN_BALL_STREAM_BYTES],
 	draw_counts: &[u64; mldsa44::TAU],
 	expected_coeffs: &[u64; mldsa44::N],
 ) -> bool {
@@ -211,7 +211,7 @@ fn verify_mldsa44_sample_in_ball_stream_witness(
 		.map(|_| builder.add_witness())
 		.collect();
 
-	let sample = sample_in_ball_one_block_from_stream_for::<Mldsa44>(&builder, &stream_words);
+	let sample = sample_in_ball_fixed_cap_from_stream_for::<Mldsa44>(&builder, &stream_words);
 	for (i, (&computed, &expected)) in sample
 		.coeffs
 		.iter()
@@ -241,7 +241,7 @@ fn verify_mldsa44_sample_in_ball_stream_witness(
 	verify_constraints(cs, &witness.into_value_vec()).is_ok()
 }
 
-fn verify_mldsa44_one_block_hidden_hash_relation_witness(
+fn verify_mldsa44_fixed_cap_hidden_hash_relation_witness(
 	mu_and_w1_bytes: &[u8],
 	c_tilde: &[u8; mldsa44::C_TILDE_BYTES],
 	expected_coeffs: &[u64; mldsa44::N],
@@ -263,7 +263,7 @@ fn verify_mldsa44_one_block_hidden_hash_relation_witness(
 		.collect();
 
 	let sample =
-		one_block_hidden_hash_relation_for::<Mldsa44>(&builder, &c_tilde_words, &mu_and_w1_words);
+		fixed_cap_hidden_hash_relation_for::<Mldsa44>(&builder, &c_tilde_words, &mu_and_w1_words);
 	for (i, (&computed, &expected)) in sample
 		.coeffs
 		.iter()
@@ -352,7 +352,7 @@ fn verify_mldsa44_w1encode_hash_relation_witness(
 		.map(|_| builder.add_witness())
 		.collect();
 
-	let sample = one_block_w1encode_hash_relation_for::<Mldsa44>(
+	let sample = fixed_cap_w1encode_hash_relation_for::<Mldsa44>(
 		&builder,
 		&c_tilde_words,
 		&mu_words,
@@ -454,7 +454,7 @@ fn verify_mldsa44_use_hint_hash_relation_witness(
 		.map(|_| builder.add_witness())
 		.collect();
 
-	let sample = one_block_use_hint_hash_relation_for::<Mldsa44>(
+	let sample = fixed_cap_use_hint_hash_relation_for::<Mldsa44>(
 		&builder,
 		&c_tilde_words,
 		&mu_words,
@@ -564,7 +564,7 @@ fn verify_mldsa44_hint_matches_expanded_witness(
 	verify_constraints(cs, &witness.into_value_vec()).is_ok()
 }
 
-fn build_mldsa44_full_bit_heavy_one_block_circuit() -> binius_frontend::Circuit {
+fn build_mldsa44_full_bit_heavy_fixed_cap_circuit() -> binius_frontend::Circuit {
 	let builder = CircuitBuilder::new();
 	let c_tilde: Vec<_> = (0..mldsa44::C_TILDE_BYTES / 8)
 		.map(|_| builder.add_witness())
@@ -582,7 +582,7 @@ fn build_mldsa44_full_bit_heavy_one_block_circuit() -> binius_frontend::Circuit 
 		.map(|_| builder.add_witness())
 		.collect();
 
-	full_bit_heavy_one_block_relation_for::<Mldsa44>(
+	full_bit_heavy_fixed_cap_relation_for::<Mldsa44>(
 		&builder,
 		&c_tilde,
 		&z_words,
@@ -594,7 +594,7 @@ fn build_mldsa44_full_bit_heavy_one_block_circuit() -> binius_frontend::Circuit 
 	builder.build()
 }
 
-fn build_mldsa44_full_bit_heavy_one_block_canonical_hint_circuit() -> binius_frontend::Circuit {
+fn build_mldsa44_full_bit_heavy_fixed_cap_canonical_hint_circuit() -> binius_frontend::Circuit {
 	let builder = CircuitBuilder::new();
 	let c_tilde: Vec<_> = (0..mldsa44::C_TILDE_BYTES / 8)
 		.map(|_| builder.add_witness())
@@ -612,7 +612,7 @@ fn build_mldsa44_full_bit_heavy_one_block_canonical_hint_circuit() -> binius_fro
 		.map(|_| builder.add_witness())
 		.collect();
 
-	full_bit_heavy_one_block_canonical_hint_relation_for::<Mldsa44>(
+	full_bit_heavy_fixed_cap_canonical_hint_relation_for::<Mldsa44>(
 		&builder,
 		&c_tilde,
 		&z_words,
@@ -624,7 +624,7 @@ fn build_mldsa44_full_bit_heavy_one_block_canonical_hint_circuit() -> binius_fro
 	builder.build()
 }
 
-fn build_full_bit_heavy_one_block_canonical_hint_matched_circuit_for<P: MldsaParams>()
+fn build_full_bit_heavy_fixed_cap_canonical_hint_matched_circuit_for<P: MldsaParams>()
 -> binius_frontend::Circuit {
 	let builder = CircuitBuilder::new();
 	let c_tilde: Vec<_> = (0..P::C_TILDE_BYTES / 8)
@@ -642,7 +642,7 @@ fn build_full_bit_heavy_one_block_canonical_hint_matched_circuit_for<P: MldsaPar
 		.map(|_| builder.add_witness())
 		.collect();
 
-	full_bit_heavy_one_block_canonical_hint_matched_relation_for::<P>(
+	full_bit_heavy_fixed_cap_canonical_hint_matched_relation_for::<P>(
 		&builder,
 		&c_tilde,
 		&z_words,
@@ -655,9 +655,9 @@ fn build_full_bit_heavy_one_block_canonical_hint_matched_circuit_for<P: MldsaPar
 	builder.build()
 }
 
-fn build_mldsa44_full_bit_heavy_one_block_canonical_hint_matched_circuit()
+fn build_mldsa44_full_bit_heavy_fixed_cap_canonical_hint_matched_circuit()
 -> binius_frontend::Circuit {
-	build_full_bit_heavy_one_block_canonical_hint_matched_circuit_for::<Mldsa44>()
+	build_full_bit_heavy_fixed_cap_canonical_hint_matched_circuit_for::<Mldsa44>()
 }
 
 fn verify_mldsa44_z_decode_witness(packed_y_coeff_values: &[u64]) {
@@ -709,6 +709,309 @@ fn verify_mldsa44_z_norm_witness(packed_y_coeff_values: &[u64]) -> bool {
 	verify_constraints(cs, &witness.into_value_vec()).is_ok()
 }
 
+fn pack_z_y_coeffs_for<P: MldsaParams>(packed_y_coeff_values: &[u64]) -> Vec<u64> {
+	assert_eq!(packed_y_coeff_values.len(), P::Z_COEFFICIENTS);
+
+	let mut words = vec![0u64; P::Z_PACKED_WORDS];
+	for (coeff_idx, &coeff) in packed_y_coeff_values.iter().enumerate() {
+		assert!(coeff < (1 << P::Z_BITS_PER_COEFF));
+		for bit in 0..P::Z_BITS_PER_COEFF {
+			if (coeff >> bit) & 1 == 1 {
+				let bit_idx = coeff_idx * P::Z_BITS_PER_COEFF + bit;
+				words[bit_idx / 64] |= 1 << (bit_idx % 64);
+			}
+		}
+	}
+
+	words
+}
+
+fn verify_z_packed_bytes_norm_witness_for<P: MldsaParams>(packed_y_coeff_values: &[u64]) -> bool {
+	let z_word_values = pack_z_y_coeffs_for::<P>(packed_y_coeff_values);
+	let builder = CircuitBuilder::new();
+	let z_words: Vec<_> = (0..z_word_values.len())
+		.map(|_| builder.add_witness())
+		.collect();
+	assert_z_packed_bytes_norm_for::<P>(&builder, &z_words);
+
+	let circuit = builder.build();
+	let cs = circuit.constraint_system();
+	let mut witness = circuit.new_witness_filler();
+	for (&wire, &value) in z_words.iter().zip(z_word_values.iter()) {
+		witness[wire] = Word(value);
+	}
+	if circuit.populate_wire_witness(&mut witness).is_err() {
+		return false;
+	}
+	verify_constraints(cs, &witness.into_value_vec()).is_ok()
+}
+
+fn pack_hint_bytes_for<P: MldsaParams>(positions_per_poly: &[Vec<u8>]) -> Vec<u8> {
+	assert_eq!(positions_per_poly.len(), P::K);
+
+	let mut h = vec![0u8; P::HINT_BYTES];
+	let mut idx = 0usize;
+	for (poly_idx, positions) in positions_per_poly.iter().enumerate() {
+		for &pos in positions {
+			assert!(idx < P::OMEGA_USIZE);
+			h[idx] = pos;
+			idx += 1;
+		}
+		h[P::OMEGA_USIZE + poly_idx] = idx as u8;
+	}
+
+	h
+}
+
+fn host_decode_hint_for<P: MldsaParams>(h_bytes: &[u8]) -> Option<Vec<u64>> {
+	assert_eq!(h_bytes.len(), P::HINT_BYTES);
+
+	let mut h = vec![0u64; P::W1_COEFFICIENTS];
+	let mut index = 0usize;
+	for poly_idx in 0..P::K {
+		let endpoint = h_bytes[P::OMEGA_USIZE + poly_idx] as usize;
+		if endpoint < index || endpoint > P::OMEGA_USIZE {
+			return None;
+		}
+		let mut prev = None;
+		for &pos in &h_bytes[index..endpoint] {
+			if pos as usize >= P::N {
+				return None;
+			}
+			if let Some(prev) = prev {
+				if pos <= prev {
+					return None;
+				}
+			}
+			h[poly_idx * P::N + pos as usize] = 1;
+			prev = Some(pos);
+		}
+		index = endpoint;
+	}
+	if h_bytes[index..P::OMEGA_USIZE].iter().any(|&x| x != 0) {
+		return None;
+	}
+	Some(h)
+}
+
+fn verify_hint_decode_witness_for<P: MldsaParams>(h_bytes: &[u8], expected_h: &[u64]) -> bool {
+	let h_word_values = words_from_bytes(h_bytes);
+	let builder = CircuitBuilder::new();
+	let h_words: Vec<_> = (0..h_word_values.len())
+		.map(|_| builder.add_witness())
+		.collect();
+	let expected_wires: Vec<_> = (0..expected_h.len())
+		.map(|_| builder.add_witness())
+		.collect();
+
+	let decoded = decode_hint_canonical_for::<P>(&builder, &h_words);
+	for (i, (&computed, &expected)) in decoded.iter().zip(expected_wires.iter()).enumerate() {
+		builder.assert_eq(format!("{}_hint_decode[{i}]", P::label()), computed, expected);
+	}
+
+	let circuit = builder.build();
+	let cs = circuit.constraint_system();
+	let mut witness = circuit.new_witness_filler();
+	for (&wire, &value) in h_words.iter().zip(h_word_values.iter()) {
+		witness[wire] = Word(value);
+	}
+	for (&wire, &value) in expected_wires.iter().zip(expected_h.iter()) {
+		witness[wire] = Word(value);
+	}
+	if circuit.populate_wire_witness(&mut witness).is_err() {
+		return false;
+	}
+	verify_constraints(cs, &witness.into_value_vec()).is_ok()
+}
+
+fn verify_hint_matches_expanded_witness_for<P: MldsaParams>(
+	h_bytes: &[u8],
+	h_values: &[u64],
+) -> bool {
+	let h_word_values = words_from_bytes(h_bytes);
+	let builder = CircuitBuilder::new();
+	let h_words: Vec<_> = (0..h_word_values.len())
+		.map(|_| builder.add_witness())
+		.collect();
+	let h_coeffs: Vec<_> = (0..h_values.len()).map(|_| builder.add_witness()).collect();
+
+	assert_hint_canonical_matches_expanded_for::<P>(&builder, &h_words, &h_coeffs);
+
+	let circuit = builder.build();
+	let cs = circuit.constraint_system();
+	let mut witness = circuit.new_witness_filler();
+	for (&wire, &value) in h_words.iter().zip(h_word_values.iter()) {
+		witness[wire] = Word(value);
+	}
+	for (&wire, &value) in h_coeffs.iter().zip(h_values.iter()) {
+		witness[wire] = Word(value);
+	}
+	if circuit.populate_wire_witness(&mut witness).is_err() {
+		return false;
+	}
+	verify_constraints(cs, &witness.into_value_vec()).is_ok()
+}
+
+fn host_high_bits_for<P: MldsaParams>(r: u64) -> u64 {
+	assert!(r < P::Q);
+	let mut r1 = (r + 127) >> 7;
+	if P::GAMMA2 == (P::Q - 1) / 32 {
+		r1 = ((r1 * 1025) + (1 << 21)) >> 22;
+		r1 & 15
+	} else {
+		r1 = ((r1 * 11_275) + (1 << 23)) >> 24;
+		if r1 > P::W1_COEFF_MAX { 0 } else { r1 }
+	}
+}
+
+fn host_r0_is_positive_for<P: MldsaParams>(r: u64, r1: u64) -> bool {
+	let r1_alpha = r1 * P::TWO_GAMMA2;
+	r >= r1_alpha && r != r1_alpha && r - r1_alpha <= (P::Q - 1) / 2
+}
+
+fn host_use_hint_for<P: MldsaParams>(h: u64, r: u64) -> u64 {
+	assert!(h <= 1);
+	let r1 = host_high_bits_for::<P>(r);
+	if h == 0 {
+		return r1;
+	}
+
+	if host_r0_is_positive_for::<P>(r, r1) {
+		if r1 == P::W1_COEFF_MAX { 0 } else { r1 + 1 }
+	} else if r1 == 0 {
+		P::W1_COEFF_MAX
+	} else {
+		r1 - 1
+	}
+}
+
+fn verify_use_hint_witness_for<P: MldsaParams>(
+	h_values: &[u64],
+	r_values: &[u64],
+	expected_w1: &[u64],
+) -> bool {
+	let builder = CircuitBuilder::new();
+	let h_wires: Vec<_> = (0..h_values.len()).map(|_| builder.add_witness()).collect();
+	let r_wires: Vec<_> = (0..r_values.len()).map(|_| builder.add_witness()).collect();
+	let expected_wires: Vec<_> = (0..expected_w1.len())
+		.map(|_| builder.add_witness())
+		.collect();
+
+	let w1 = use_hint_for::<P>(&builder, &h_wires, &r_wires);
+	for (i, (&computed, &expected)) in w1.iter().zip(expected_wires.iter()).enumerate() {
+		builder.assert_eq(format!("{}_use_hint[{i}]", P::label()), computed, expected);
+	}
+
+	let circuit = builder.build();
+	let cs = circuit.constraint_system();
+	let mut witness = circuit.new_witness_filler();
+	for (&wire, &value) in h_wires.iter().zip(h_values.iter()) {
+		witness[wire] = Word(value);
+	}
+	for (&wire, &value) in r_wires.iter().zip(r_values.iter()) {
+		witness[wire] = Word(value);
+	}
+	for (&wire, &value) in expected_wires.iter().zip(expected_w1.iter()) {
+		witness[wire] = Word(value);
+	}
+	if circuit.populate_wire_witness(&mut witness).is_err() {
+		return false;
+	}
+	verify_constraints(cs, &witness.into_value_vec()).is_ok()
+}
+
+fn host_sample_in_ball_fixed_cap_for<P: MldsaParams>(
+	stream: &[u8],
+) -> Option<(Vec<u64>, Vec<u64>)> {
+	assert_eq!(stream.len(), P::SAMPLE_IN_BALL_STREAM_BYTES);
+
+	let mut signs = u64::from_le_bytes(stream[..8].try_into().unwrap());
+	let mut draw_cursor = P::SAMPLE_IN_BALL_SIGN_BYTES;
+	let mut coeffs = vec![0u64; P::N];
+	let mut draw_counts = vec![0u64; P::TAU];
+
+	for (round, i) in (P::N - P::TAU..P::N).enumerate() {
+		let mut count = 0u64;
+		let accepted_j = loop {
+			if draw_cursor >= stream.len() {
+				return None;
+			}
+			let draw = stream[draw_cursor] as usize;
+			draw_cursor += 1;
+			count += 1;
+			if draw <= i {
+				break draw;
+			}
+		};
+
+		coeffs[i] = coeffs[accepted_j];
+		coeffs[accepted_j] = if signs & 1 == 1 { u64::MAX } else { 1 };
+		signs >>= 1;
+		draw_counts[round] = count;
+	}
+
+	Some((coeffs, draw_counts))
+}
+
+fn deterministic_sample_in_ball_stream_for<P: MldsaParams>() -> Vec<u8> {
+	let mut stream = vec![0u8; P::SAMPLE_IN_BALL_STREAM_BYTES];
+	stream[..8].copy_from_slice(&0x0000_0055_AA55_33CCu64.to_le_bytes());
+
+	let mut pos = P::SAMPLE_IN_BALL_SIGN_BYTES;
+	for (round, i) in (P::N - P::TAU..P::N).enumerate() {
+		if round % 5 == 0 && i < 255 {
+			stream[pos] = 255;
+			pos += 1;
+		}
+		stream[pos] = ((i * 17 + round * 29) % (i + 1)) as u8;
+		pos += 1;
+	}
+
+	stream
+}
+
+fn verify_sample_in_ball_stream_witness_for<P: MldsaParams>(
+	stream: &[u8],
+	draw_counts: &[u64],
+	expected_coeffs: &[u64],
+) -> bool {
+	let stream_word_values = words_from_bytes(stream);
+	let builder = CircuitBuilder::new();
+	let stream_words: Vec<_> = (0..stream_word_values.len())
+		.map(|_| builder.add_witness())
+		.collect();
+	let expected_coeff_wires: Vec<_> = (0..expected_coeffs.len())
+		.map(|_| builder.add_witness())
+		.collect();
+
+	let sample = sample_in_ball_fixed_cap_from_stream_for::<P>(&builder, &stream_words);
+	for (i, (&computed, &expected)) in sample
+		.coeffs
+		.iter()
+		.zip(expected_coeff_wires.iter())
+		.enumerate()
+	{
+		builder.assert_eq(format!("{}_sample_in_ball_coeff[{i}]", P::label()), computed, expected);
+	}
+
+	let circuit = builder.build();
+	let cs = circuit.constraint_system();
+	let mut witness = circuit.new_witness_filler();
+	for (&wire, &value) in stream_words.iter().zip(stream_word_values.iter()) {
+		witness[wire] = Word(value);
+	}
+	for (&wire, &value) in sample.draw_counts.iter().zip(draw_counts.iter()) {
+		witness[wire] = Word(value);
+	}
+	for (&wire, &value) in expected_coeff_wires.iter().zip(expected_coeffs.iter()) {
+		witness[wire] = Word(value);
+	}
+	if circuit.populate_wire_witness(&mut witness).is_err() {
+		return false;
+	}
+	verify_constraints(cs, &witness.into_value_vec()).is_ok()
+}
+
 #[test]
 fn mldsa44_final_challenge_hash_matches_shake256() {
 	let mut rng = StdRng::seed_from_u64(0x4D4C4453413434);
@@ -752,7 +1055,7 @@ fn mldsa44_final_challenge_hash_matches_shake256() {
 }
 
 #[test]
-fn mldsa44_sample_in_ball_one_block_stream_matches_shake256() {
+fn mldsa44_sample_in_ball_fixed_cap_stream_matches_shake256() {
 	let mut rng = StdRng::seed_from_u64(0x53414D504C453434);
 	let mut c_tilde = [0u8; mldsa44::C_TILDE_BYTES];
 	rng.fill_bytes(&mut c_tilde);
@@ -760,16 +1063,17 @@ fn mldsa44_sample_in_ball_one_block_stream_matches_shake256() {
 	let mut hasher = Shake256::default();
 	hasher.update(&c_tilde);
 	let mut reader = hasher.finalize_xof();
-	let mut expected = [0u8; mldsa44::SAMPLE_IN_BALL_ONE_BLOCK_STREAM_BYTES];
+	let mut expected = [0u8; mldsa44::SAMPLE_IN_BALL_STREAM_BYTES];
 	reader.read(&mut expected);
 
 	let builder = CircuitBuilder::new();
 	let c_tilde_wires: [Wire; mldsa44::C_TILDE_BYTES / 8] =
 		std::array::from_fn(|_| builder.add_witness());
-	let expected_wires: [Wire; mldsa44::SAMPLE_IN_BALL_ONE_BLOCK_STREAM_BYTES / 8] =
-		std::array::from_fn(|_| builder.add_witness());
+	let expected_wires: Vec<_> = (0..mldsa44::SAMPLE_IN_BALL_STREAM_BYTES.div_ceil(8))
+		.map(|_| builder.add_witness())
+		.collect();
 
-	let computed = sample_in_ball_one_block_stream_for::<Mldsa44>(&builder, &c_tilde_wires);
+	let computed = sample_in_ball_fixed_cap_stream_for::<Mldsa44>(&builder, &c_tilde_wires);
 	for i in 0..computed.len() {
 		builder.assert_eq(format!("sample_in_ball_stream[{i}]"), computed[i], expected_wires[i]);
 	}
@@ -793,19 +1097,19 @@ fn mldsa44_sample_in_ball_one_block_stream_matches_shake256() {
 }
 
 #[test]
-fn mldsa44_sample_in_ball_one_block_accepts_valid_trace() {
+fn mldsa44_sample_in_ball_fixed_cap_accepts_valid_trace() {
 	let stream = deterministic_sample_in_ball_stream();
 	let (expected_coeffs, draw_counts) =
-		host_sample_in_ball_one_block(&stream).expect("stream should satisfy one-block cap");
+		host_sample_in_ball_fixed_cap(&stream).expect("stream should satisfy fixed-cap cap");
 
 	assert!(verify_mldsa44_sample_in_ball_stream_witness(&stream, &draw_counts, &expected_coeffs,));
 }
 
 #[test]
-fn mldsa44_sample_in_ball_one_block_rejects_wrong_draw_count() {
+fn mldsa44_sample_in_ball_fixed_cap_rejects_wrong_draw_count() {
 	let stream = deterministic_sample_in_ball_stream();
 	let (expected_coeffs, mut draw_counts) =
-		host_sample_in_ball_one_block(&stream).expect("stream should satisfy one-block cap");
+		host_sample_in_ball_fixed_cap(&stream).expect("stream should satisfy fixed-cap cap");
 	let bad_round = draw_counts.iter().position(|&count| count > 1).unwrap();
 	draw_counts[bad_round] -= 1;
 
@@ -815,7 +1119,7 @@ fn mldsa44_sample_in_ball_one_block_rejects_wrong_draw_count() {
 }
 
 #[test]
-fn mldsa44_one_block_hidden_hash_relation_accepts_valid_binding() {
+fn mldsa44_fixed_cap_hidden_hash_relation_accepts_valid_binding() {
 	let mut rng = StdRng::seed_from_u64(0x4841534852454C);
 	let mut mu_and_w1_bytes = vec![0u8; mldsa44::FINAL_CHALLENGE_INPUT_BYTES];
 	rng.fill_bytes(&mut mu_and_w1_bytes);
@@ -829,12 +1133,12 @@ fn mldsa44_one_block_hidden_hash_relation_accepts_valid_binding() {
 	let mut sample_hasher = Shake256::default();
 	sample_hasher.update(&c_tilde);
 	let mut sample_reader = sample_hasher.finalize_xof();
-	let mut sample_stream = [0u8; mldsa44::SAMPLE_IN_BALL_ONE_BLOCK_STREAM_BYTES];
+	let mut sample_stream = [0u8; mldsa44::SAMPLE_IN_BALL_STREAM_BYTES];
 	sample_reader.read(&mut sample_stream);
 	let (expected_coeffs, draw_counts) =
-		host_sample_in_ball_one_block(&sample_stream).expect("stream should satisfy cap");
+		host_sample_in_ball_fixed_cap(&sample_stream).expect("stream should satisfy cap");
 
-	assert!(verify_mldsa44_one_block_hidden_hash_relation_witness(
+	assert!(verify_mldsa44_fixed_cap_hidden_hash_relation_witness(
 		&mu_and_w1_bytes,
 		&c_tilde,
 		&expected_coeffs,
@@ -843,7 +1147,7 @@ fn mldsa44_one_block_hidden_hash_relation_accepts_valid_binding() {
 }
 
 #[test]
-fn mldsa44_one_block_hidden_hash_relation_rejects_c_tilde_mutation() {
+fn mldsa44_fixed_cap_hidden_hash_relation_rejects_c_tilde_mutation() {
 	let mut rng = StdRng::seed_from_u64(0x4841534852454D);
 	let mut mu_and_w1_bytes = vec![0u8; mldsa44::FINAL_CHALLENGE_INPUT_BYTES];
 	rng.fill_bytes(&mut mu_and_w1_bytes);
@@ -857,14 +1161,14 @@ fn mldsa44_one_block_hidden_hash_relation_rejects_c_tilde_mutation() {
 	let mut sample_hasher = Shake256::default();
 	sample_hasher.update(&c_tilde);
 	let mut sample_reader = sample_hasher.finalize_xof();
-	let mut sample_stream = [0u8; mldsa44::SAMPLE_IN_BALL_ONE_BLOCK_STREAM_BYTES];
+	let mut sample_stream = [0u8; mldsa44::SAMPLE_IN_BALL_STREAM_BYTES];
 	sample_reader.read(&mut sample_stream);
 	let (expected_coeffs, draw_counts) =
-		host_sample_in_ball_one_block(&sample_stream).expect("stream should satisfy cap");
+		host_sample_in_ball_fixed_cap(&sample_stream).expect("stream should satisfy cap");
 
 	c_tilde[0] ^= 1;
 
-	assert!(!verify_mldsa44_one_block_hidden_hash_relation_witness(
+	assert!(!verify_mldsa44_fixed_cap_hidden_hash_relation_witness(
 		&mu_and_w1_bytes,
 		&c_tilde,
 		&expected_coeffs,
@@ -934,10 +1238,10 @@ fn mldsa44_w1encode_hash_relation_accepts_valid_binding() {
 	let mut sample_hasher = Shake256::default();
 	sample_hasher.update(&c_tilde);
 	let mut sample_reader = sample_hasher.finalize_xof();
-	let mut sample_stream = [0u8; mldsa44::SAMPLE_IN_BALL_ONE_BLOCK_STREAM_BYTES];
+	let mut sample_stream = [0u8; mldsa44::SAMPLE_IN_BALL_STREAM_BYTES];
 	sample_reader.read(&mut sample_stream);
 	let (expected_coeffs, draw_counts) =
-		host_sample_in_ball_one_block(&sample_stream).expect("stream should satisfy cap");
+		host_sample_in_ball_fixed_cap(&sample_stream).expect("stream should satisfy cap");
 
 	assert!(verify_mldsa44_w1encode_hash_relation_witness(
 		&mu,
@@ -1043,10 +1347,10 @@ fn mldsa44_use_hint_hash_relation_accepts_valid_binding() {
 	let mut sample_hasher = Shake256::default();
 	sample_hasher.update(&c_tilde);
 	let mut sample_reader = sample_hasher.finalize_xof();
-	let mut sample_stream = [0u8; mldsa44::SAMPLE_IN_BALL_ONE_BLOCK_STREAM_BYTES];
+	let mut sample_stream = [0u8; mldsa44::SAMPLE_IN_BALL_STREAM_BYTES];
 	sample_reader.read(&mut sample_stream);
 	let (expected_coeffs, draw_counts) =
-		host_sample_in_ball_one_block(&sample_stream).expect("stream should satisfy cap");
+		host_sample_in_ball_fixed_cap(&sample_stream).expect("stream should satisfy cap");
 
 	assert!(verify_mldsa44_use_hint_hash_relation_witness(
 		&mu,
@@ -1111,8 +1415,8 @@ fn mldsa44_hint_match_rejects_extra_expanded_bit() {
 }
 
 #[test]
-fn mldsa44_full_bit_heavy_one_block_circuit_builds_and_prints_stats() {
-	let circuit = build_mldsa44_full_bit_heavy_one_block_circuit();
+fn mldsa44_full_bit_heavy_fixed_cap_circuit_builds_and_prints_stats() {
+	let circuit = build_mldsa44_full_bit_heavy_fixed_cap_circuit();
 	let stat = CircuitStat::collect(&circuit);
 
 	println!("{stat}");
@@ -1126,8 +1430,8 @@ fn mldsa44_full_bit_heavy_one_block_circuit_builds_and_prints_stats() {
 }
 
 #[test]
-fn mldsa44_full_bit_heavy_one_block_canonical_hint_circuit_builds_and_prints_stats() {
-	let circuit = build_mldsa44_full_bit_heavy_one_block_canonical_hint_circuit();
+fn mldsa44_full_bit_heavy_fixed_cap_canonical_hint_circuit_builds_and_prints_stats() {
+	let circuit = build_mldsa44_full_bit_heavy_fixed_cap_canonical_hint_circuit();
 	let stat = CircuitStat::collect(&circuit);
 
 	println!("{stat}");
@@ -1141,8 +1445,8 @@ fn mldsa44_full_bit_heavy_one_block_canonical_hint_circuit_builds_and_prints_sta
 }
 
 #[test]
-fn mldsa44_full_bit_heavy_one_block_canonical_hint_matched_circuit_builds_and_prints_stats() {
-	let circuit = build_mldsa44_full_bit_heavy_one_block_canonical_hint_matched_circuit();
+fn mldsa44_full_bit_heavy_fixed_cap_canonical_hint_matched_circuit_builds_and_prints_stats() {
+	let circuit = build_mldsa44_full_bit_heavy_fixed_cap_canonical_hint_matched_circuit();
 	let stat = CircuitStat::collect(&circuit);
 
 	println!("{stat}");
@@ -1156,8 +1460,8 @@ fn mldsa44_full_bit_heavy_one_block_canonical_hint_matched_circuit_builds_and_pr
 }
 
 #[test]
-fn mldsa65_full_bit_heavy_one_block_canonical_hint_matched_circuit_builds() {
-	let circuit = build_full_bit_heavy_one_block_canonical_hint_matched_circuit_for::<Mldsa65>();
+fn mldsa65_full_bit_heavy_fixed_cap_canonical_hint_matched_circuit_builds() {
+	let circuit = build_full_bit_heavy_fixed_cap_canonical_hint_matched_circuit_for::<Mldsa65>();
 	let stat = CircuitStat::collect(&circuit);
 
 	assert_eq!(stat.n_inout, mldsa65::MU_WORDS);
@@ -1167,8 +1471,8 @@ fn mldsa65_full_bit_heavy_one_block_canonical_hint_matched_circuit_builds() {
 }
 
 #[test]
-fn mldsa87_full_bit_heavy_one_block_canonical_hint_matched_circuit_builds() {
-	let circuit = build_full_bit_heavy_one_block_canonical_hint_matched_circuit_for::<Mldsa87>();
+fn mldsa87_full_bit_heavy_fixed_cap_canonical_hint_matched_circuit_builds() {
+	let circuit = build_full_bit_heavy_fixed_cap_canonical_hint_matched_circuit_for::<Mldsa87>();
 	let stat = CircuitStat::collect(&circuit);
 
 	assert_eq!(stat.n_inout, mldsa87::MU_WORDS);
@@ -1435,7 +1739,7 @@ fn mldsa44_use_hint_accepts_weight_eq_omega() {
 #[test]
 fn mldsa44_sample_in_ball_rejects_zero_draw_count() {
 	let stream = deterministic_sample_in_ball_stream();
-	let (expected_coeffs, mut draw_counts) = host_sample_in_ball_one_block(&stream).unwrap();
+	let (expected_coeffs, mut draw_counts) = host_sample_in_ball_fixed_cap(&stream).unwrap();
 	// Zero out the first round's draw count (must be >= 1).
 	draw_counts[0] = 0;
 	assert!(
@@ -1446,11 +1750,11 @@ fn mldsa44_sample_in_ball_rejects_zero_draw_count() {
 #[test]
 fn mldsa44_sample_in_ball_rejects_overcap_draw_counts() {
 	let stream = deterministic_sample_in_ball_stream();
-	let (expected_coeffs, mut draw_counts) = host_sample_in_ball_one_block(&stream).unwrap();
+	let (expected_coeffs, mut draw_counts) = host_sample_in_ball_fixed_cap(&stream).unwrap();
 	// Inflate the last round's draw_count to push the cumulative cursor past 128.
 	let total: u64 = draw_counts.iter().sum();
 	let last = draw_counts.last_mut().unwrap();
-	*last += mldsa44::SAMPLE_IN_BALL_ONE_BLOCK_DRAW_CAP_BYTES as u64 + 1 - total;
+	*last += mldsa44::SAMPLE_IN_BALL_DRAW_CAP_BYTES as u64 + 1 - total;
 	assert!(
 		!verify_mldsa44_sample_in_ball_stream_witness(&stream, &draw_counts, &expected_coeffs,)
 	);
@@ -1459,7 +1763,7 @@ fn mldsa44_sample_in_ball_rejects_overcap_draw_counts() {
 #[test]
 fn mldsa44_sample_in_ball_rejects_wrong_sign_bit() {
 	let mut stream = deterministic_sample_in_ball_stream();
-	let (expected_coeffs, draw_counts) = host_sample_in_ball_one_block(&stream).unwrap();
+	let (expected_coeffs, draw_counts) = host_sample_in_ball_fixed_cap(&stream).unwrap();
 	// Flip a sign bit so the host-derived `expected_coeffs` no longer match what the circuit
 	// computes from the (mutated) stream.
 	stream[0] ^= 0b1;
@@ -1474,7 +1778,7 @@ fn mldsa44_sample_in_ball_rejects_swapped_skip_and_accept() {
 	// accepts the second byte; we mutate the witness to swap the bytes so the trail looks
 	// like "accept byte 0, skip byte 1". The skipped-draw constraint requires skipped > i,
 	// so a draw <= i in a skipped slot fails.
-	let mut stream = [0u8; mldsa44::SAMPLE_IN_BALL_ONE_BLOCK_STREAM_BYTES];
+	let mut stream = [0u8; mldsa44::SAMPLE_IN_BALL_STREAM_BYTES];
 	stream[..8].copy_from_slice(&0u64.to_le_bytes());
 	// Round 0: i = 217. Put 220 (>217), then 100 (<=217), then easy bytes for later rounds.
 	stream[mldsa44::SAMPLE_IN_BALL_SIGN_BYTES] = 220;
@@ -1485,7 +1789,7 @@ fn mldsa44_sample_in_ball_rejects_swapped_skip_and_accept() {
 		byte_pos += 1;
 	}
 	let (expected_coeffs, _draw_counts) =
-		host_sample_in_ball_one_block(&stream).expect("constructed stream should satisfy cap");
+		host_sample_in_ball_fixed_cap(&stream).expect("constructed stream should satisfy cap");
 
 	// Build a malicious draw_counts that pretends the first round consumed only 1 byte, so
 	// `accepted_pos = 0` and `accepted_draw = 220 > 217`.
@@ -1494,7 +1798,7 @@ fn mldsa44_sample_in_ball_rejects_swapped_skip_and_accept() {
 	// otherwise we would also fail there. So just assert the swap fails.
 	bad_draw_counts[0] = 1;
 	// The rest of `bad_draw_counts` is whatever the host says.
-	let host = host_sample_in_ball_one_block(&stream).unwrap().1;
+	let host = host_sample_in_ball_fixed_cap(&stream).unwrap().1;
 	bad_draw_counts[1..].copy_from_slice(&host[1..]);
 	assert!(!verify_mldsa44_sample_in_ball_stream_witness(
 		&stream,
@@ -1735,4 +2039,170 @@ fn mldsa44_z_norm_packed_y_and_packed_bytes_gadgets_agree(#[case] slot: usize, #
 		from_packed_y, from_packed_bytes,
 		"the two z-norm gadgets disagree at slot {slot} y={y}",
 	);
+}
+
+fn assert_variant_negative_gadget_validation_for<P: MldsaParams>() {
+	let mut z = vec![P::Z_NORM_PACKED_Y_MIN; P::Z_COEFFICIENTS];
+	assert!(verify_z_packed_bytes_norm_witness_for::<P>(&z));
+	for slot in [0, 3, P::N - 1, P::N, P::Z_COEFFICIENTS - 1] {
+		z[slot] = P::Z_NORM_PACKED_Y_MIN - 1;
+		assert!(
+			!verify_z_packed_bytes_norm_witness_for::<P>(&z),
+			"{} z norm accepted below-min y at slot {slot}",
+			P::label(),
+		);
+		z[slot] = P::Z_NORM_PACKED_Y_MAX + 1;
+		assert!(
+			!verify_z_packed_bytes_norm_witness_for::<P>(&z),
+			"{} z norm accepted above-max y at slot {slot}",
+			P::label(),
+		);
+		z[slot] = P::Z_NORM_PACKED_Y_MIN;
+	}
+
+	let mut hint_positions = Vec::with_capacity(P::K);
+	let mut remaining = P::OMEGA_USIZE.min(P::K * 3);
+	for poly_idx in 0..P::K {
+		let take = remaining.min(3);
+		remaining -= take;
+		let mut poly = Vec::with_capacity(take);
+		for j in 0..take {
+			poly.push(((17 * poly_idx + 41 * j + 5) % P::N) as u8);
+		}
+		poly.sort_unstable();
+		poly.dedup();
+		hint_positions.push(poly);
+	}
+	let h_bytes = pack_hint_bytes_for::<P>(&hint_positions);
+	let expanded = host_decode_hint_for::<P>(&h_bytes).expect("canonical hint fixture");
+	assert!(verify_hint_decode_witness_for::<P>(&h_bytes, &expanded));
+	assert!(verify_hint_matches_expanded_witness_for::<P>(&h_bytes, &expanded));
+
+	let mut nonmonotone_endpoint = h_bytes.clone();
+	nonmonotone_endpoint[P::OMEGA_USIZE + 0] = 2;
+	if P::K > 1 {
+		nonmonotone_endpoint[P::OMEGA_USIZE + 1] = 1;
+	}
+	assert!(
+		!verify_hint_decode_witness_for::<P>(&nonmonotone_endpoint, &expanded),
+		"{} hint decode accepted nonmonotone endpoints",
+		P::label(),
+	);
+
+	let mut nonzero_unused = h_bytes.clone();
+	let last_endpoint = nonzero_unused[P::OMEGA_USIZE + P::K - 1] as usize;
+	assert!(last_endpoint < P::OMEGA_USIZE);
+	nonzero_unused[last_endpoint] = nonzero_unused[last_endpoint].wrapping_add(1).max(1);
+	assert!(
+		!verify_hint_decode_witness_for::<P>(&nonzero_unused, &expanded),
+		"{} hint decode accepted nonzero unused byte",
+		P::label(),
+	);
+
+	let mut missing_bit = expanded.clone();
+	let first_one = missing_bit.iter().position(|&x| x == 1).unwrap();
+	missing_bit[first_one] = 0;
+	assert!(
+		!verify_hint_matches_expanded_witness_for::<P>(&h_bytes, &missing_bit),
+		"{} canonical hint binding accepted missing expanded bit",
+		P::label(),
+	);
+
+	let mut extra_bit = expanded.clone();
+	let first_zero = extra_bit.iter().position(|&x| x == 0).unwrap();
+	extra_bit[first_zero] = 1;
+	assert!(
+		!verify_hint_matches_expanded_witness_for::<P>(&h_bytes, &extra_bit),
+		"{} canonical hint binding accepted extra expanded bit",
+		P::label(),
+	);
+
+	let mut h = vec![0u64; P::W1_COEFFICIENTS];
+	let mut r: Vec<_> = (0..P::W1_COEFFICIENTS)
+		.map(|i| ((i as u64 * 65_537) + 12_345) % P::Q)
+		.collect();
+	let expected: Vec<_> = h
+		.iter()
+		.zip(r.iter())
+		.map(|(&hh, &rr)| host_use_hint_for::<P>(hh, rr))
+		.collect();
+	assert!(verify_use_hint_witness_for::<P>(&h, &r, &expected));
+
+	h[17] = 2;
+	assert!(
+		!verify_use_hint_witness_for::<P>(&h, &r, &expected),
+		"{} UseHint accepted h=2",
+		P::label(),
+	);
+	h[17] = 0;
+
+	for hint in h.iter_mut().take(P::OMEGA_USIZE + 1) {
+		*hint = 1;
+	}
+	let overweight_expected: Vec<_> = h
+		.iter()
+		.zip(r.iter())
+		.map(|(&hh, &rr)| host_use_hint_for::<P>(hh.min(1), rr))
+		.collect();
+	assert!(
+		!verify_use_hint_witness_for::<P>(&h, &r, &overweight_expected),
+		"{} UseHint accepted hint weight above omega",
+		P::label(),
+	);
+	h.fill(0);
+
+	r[29] = P::Q;
+	assert!(
+		!verify_use_hint_witness_for::<P>(&h, &r, &expected),
+		"{} UseHint accepted r=q",
+		P::label(),
+	);
+
+	let stream = deterministic_sample_in_ball_stream_for::<P>();
+	let (expected_coeffs, draw_counts) =
+		host_sample_in_ball_fixed_cap_for::<P>(&stream).expect("deterministic stream under cap");
+	assert!(
+		verify_sample_in_ball_stream_witness_for::<P>(&stream, &draw_counts, &expected_coeffs,)
+	);
+
+	let mut bad_draw_counts = draw_counts.clone();
+	bad_draw_counts[0] = 0;
+	assert!(
+		!verify_sample_in_ball_stream_witness_for::<P>(&stream, &bad_draw_counts, &expected_coeffs,),
+		"{} SampleInBall accepted zero draw count",
+		P::label(),
+	);
+
+	let mut bad_draw_counts = draw_counts.clone();
+	let bad_round = bad_draw_counts
+		.iter()
+		.position(|&count| count > 1)
+		.unwrap_or(0);
+	bad_draw_counts[bad_round] = bad_draw_counts[bad_round].saturating_sub(1).max(1);
+	if bad_draw_counts == draw_counts {
+		bad_draw_counts[bad_round] += 1;
+	}
+	assert!(
+		!verify_sample_in_ball_stream_witness_for::<P>(&stream, &bad_draw_counts, &expected_coeffs,),
+		"{} SampleInBall accepted wrong draw trail",
+		P::label(),
+	);
+
+	let mut bad_stream = stream.clone();
+	bad_stream[0] ^= 1;
+	assert!(
+		!verify_sample_in_ball_stream_witness_for::<P>(&bad_stream, &draw_counts, &expected_coeffs,),
+		"{} SampleInBall accepted wrong sign binding",
+		P::label(),
+	);
+}
+
+#[test]
+fn mldsa65_negative_per_gadget_validation_matches_44_story() {
+	assert_variant_negative_gadget_validation_for::<Mldsa65>();
+}
+
+#[test]
+fn mldsa87_negative_per_gadget_validation_matches_44_story() {
+	assert_variant_negative_gadget_validation_for::<Mldsa87>();
 }

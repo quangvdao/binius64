@@ -7,8 +7,8 @@ use super::{
 	hashing::final_challenge_hash_for,
 	hint::{assert_hint_canonical_matches_expanded_for, decode_hint_canonical_for},
 	packing::{assert_z_packed_bytes_norm_for, encode_w1_for, encode_w1_unchecked_for},
-	sample_in_ball::{expand_sparse_sample_in_ball_for, sample_in_ball_one_block_sparse_for},
-	types::{MldsaBitHeavyCircuit, MldsaSampleInBallOneBlock, MldsaSampleInBallOneBlockSparse},
+	sample_in_ball::{expand_sparse_sample_in_ball_for, sample_in_ball_fixed_cap_sparse_for},
+	types::{MldsaBitHeavyCircuit, MldsaSampleInBallFixedCap, MldsaSampleInBallFixedCapSparse},
 	use_hint::{use_hint_checked_for, use_hint_for},
 };
 
@@ -24,30 +24,30 @@ use super::{
 /// `mu_and_w1_bytes` is a fixed 832-byte packed wire slice. In the target aggregate relation, `mu`
 /// is a fixed-width public/committed input and `w1Encode(w1_prime)` is derived from the hidden
 /// lattice bridge plus `UseHint`; for this circuit phase both arrive as wires.
-pub fn one_block_hidden_hash_relation_for<P: MldsaParams>(
+pub fn fixed_cap_hidden_hash_relation_for<P: MldsaParams>(
 	builder: &CircuitBuilder,
 	c_tilde: &[Wire],
 	mu_and_w1_bytes: &[Wire],
-) -> MldsaSampleInBallOneBlock {
-	let sparse = one_block_hidden_hash_sparse_relation_for::<P>(builder, c_tilde, mu_and_w1_bytes);
+) -> MldsaSampleInBallFixedCap {
+	let sparse = fixed_cap_hidden_hash_sparse_relation_for::<P>(builder, c_tilde, mu_and_w1_bytes);
 	let coeffs = expand_sparse_sample_in_ball_for::<P>(builder, &sparse.positions, &sparse.signs);
-	MldsaSampleInBallOneBlock {
+	MldsaSampleInBallFixedCap {
 		coeffs,
 		draw_counts: sparse.draw_counts,
 	}
 }
 
-fn one_block_hidden_hash_sparse_relation_for<P: MldsaParams>(
+fn fixed_cap_hidden_hash_sparse_relation_for<P: MldsaParams>(
 	builder: &CircuitBuilder,
 	c_tilde: &[Wire],
 	mu_and_w1_bytes: &[Wire],
-) -> MldsaSampleInBallOneBlockSparse {
+) -> MldsaSampleInBallFixedCapSparse {
 	let c_tilde_prime = final_challenge_hash_for::<P>(builder, mu_and_w1_bytes);
 	for (i, (&expected, &actual)) in c_tilde.iter().zip(c_tilde_prime.iter()).enumerate() {
 		builder.assert_eq(format!("{}_c_tilde_final_hash[{i}]", P::label()), expected, actual);
 	}
 
-	sample_in_ball_one_block_sparse_for::<P>(builder, c_tilde)
+	sample_in_ball_fixed_cap_sparse_for::<P>(builder, c_tilde)
 }
 
 /// Binds hidden `c_tilde` to `SampleInBall` and to a final hash whose `w1` bytes are encoded in
@@ -55,50 +55,50 @@ fn one_block_hidden_hash_sparse_relation_for<P: MldsaParams>(
 ///
 /// This keeps `UseHint` mocked by taking `w1_prime` directly as witness wires, but removes the
 /// earlier shortcut where prepacked `w1` bytes were supplied by the witness.
-pub fn one_block_w1encode_hash_relation_for<P: MldsaParams>(
+pub fn fixed_cap_w1encode_hash_relation_for<P: MldsaParams>(
 	builder: &CircuitBuilder,
 	c_tilde: &[Wire],
 	mu_words: &[Wire],
 	w1_coeffs: &[Wire],
-) -> MldsaSampleInBallOneBlock {
+) -> MldsaSampleInBallFixedCap {
 	let sparse =
-		one_block_w1encode_hash_sparse_relation_for::<P>(builder, c_tilde, mu_words, w1_coeffs);
+		fixed_cap_w1encode_hash_sparse_relation_for::<P>(builder, c_tilde, mu_words, w1_coeffs);
 	let coeffs = expand_sparse_sample_in_ball_for::<P>(builder, &sparse.positions, &sparse.signs);
-	MldsaSampleInBallOneBlock {
+	MldsaSampleInBallFixedCap {
 		coeffs,
 		draw_counts: sparse.draw_counts,
 	}
 }
 
-fn one_block_w1encode_hash_sparse_relation_for<P: MldsaParams>(
+fn fixed_cap_w1encode_hash_sparse_relation_for<P: MldsaParams>(
 	builder: &CircuitBuilder,
 	c_tilde: &[Wire],
 	mu_words: &[Wire],
 	w1_coeffs: &[Wire],
-) -> MldsaSampleInBallOneBlockSparse {
-	one_block_w1encode_hash_sparse_relation_impl_for::<P>(
+) -> MldsaSampleInBallFixedCapSparse {
+	fixed_cap_w1encode_hash_sparse_relation_impl_for::<P>(
 		builder, c_tilde, mu_words, w1_coeffs, true,
 	)
 }
 
-fn one_block_w1encode_hash_sparse_relation_unchecked_w1_for<P: MldsaParams>(
+fn fixed_cap_w1encode_hash_sparse_relation_unchecked_w1_for<P: MldsaParams>(
 	builder: &CircuitBuilder,
 	c_tilde: &[Wire],
 	mu_words: &[Wire],
 	w1_coeffs: &[Wire],
-) -> MldsaSampleInBallOneBlockSparse {
-	one_block_w1encode_hash_sparse_relation_impl_for::<P>(
+) -> MldsaSampleInBallFixedCapSparse {
+	fixed_cap_w1encode_hash_sparse_relation_impl_for::<P>(
 		builder, c_tilde, mu_words, w1_coeffs, false,
 	)
 }
 
-fn one_block_w1encode_hash_sparse_relation_impl_for<P: MldsaParams>(
+fn fixed_cap_w1encode_hash_sparse_relation_impl_for<P: MldsaParams>(
 	builder: &CircuitBuilder,
 	c_tilde: &[Wire],
 	mu_words: &[Wire],
 	w1_coeffs: &[Wire],
 	check_w1_range: bool,
-) -> MldsaSampleInBallOneBlockSparse {
+) -> MldsaSampleInBallFixedCapSparse {
 	assert_eq!(mu_words.len(), P::MU_WORDS, "{} mu packed word count mismatch", P::label(),);
 
 	let w1_words = if check_w1_range {
@@ -110,34 +110,34 @@ fn one_block_w1encode_hash_sparse_relation_impl_for<P: MldsaParams>(
 	hash_input.extend_from_slice(mu_words);
 	hash_input.extend_from_slice(&w1_words);
 
-	one_block_hidden_hash_sparse_relation_for::<P>(builder, c_tilde, &hash_input)
+	fixed_cap_hidden_hash_sparse_relation_for::<P>(builder, c_tilde, &hash_input)
 }
 
 /// Binds hidden `c_tilde` to `SampleInBall` and to a final hash whose `w1` bytes are derived from
 /// hidden `h` and `wApprox` through `UseHint`.
-pub fn one_block_use_hint_hash_relation_for<P: MldsaParams>(
+pub fn fixed_cap_use_hint_hash_relation_for<P: MldsaParams>(
 	builder: &CircuitBuilder,
 	c_tilde: &[Wire],
 	mu_words: &[Wire],
 	h_coeffs: &[Wire],
 	w_approx_coeffs: &[Wire],
-) -> MldsaSampleInBallOneBlock {
+) -> MldsaSampleInBallFixedCap {
 	let w1_coeffs = use_hint_for::<P>(builder, h_coeffs, w_approx_coeffs);
-	one_block_w1encode_hash_relation_for::<P>(builder, c_tilde, mu_words, &w1_coeffs)
+	fixed_cap_w1encode_hash_relation_for::<P>(builder, c_tilde, mu_words, &w1_coeffs)
 }
 
-/// Like [`one_block_use_hint_hash_relation_for`], but decodes canonical compressed hint bytes
+/// Like [`fixed_cap_use_hint_hash_relation_for`], but decodes canonical compressed hint bytes
 /// instead of taking expanded hint bits as witness.
-pub fn one_block_canonical_hint_hash_relation_for<P: MldsaParams>(
+pub fn fixed_cap_canonical_hint_hash_relation_for<P: MldsaParams>(
 	builder: &CircuitBuilder,
 	c_tilde: &[Wire],
 	mu_words: &[Wire],
 	h_words: &[Wire],
 	w_approx_coeffs: &[Wire],
-) -> MldsaSampleInBallOneBlock {
+) -> MldsaSampleInBallFixedCap {
 	let h_coeffs = decode_hint_canonical_for::<P>(builder, h_words);
 	let w1_coeffs = use_hint_checked_for::<P>(builder, &h_coeffs, w_approx_coeffs);
-	one_block_w1encode_hash_relation_for::<P>(builder, c_tilde, mu_words, &w1_coeffs)
+	fixed_cap_w1encode_hash_relation_for::<P>(builder, c_tilde, mu_words, &w1_coeffs)
 }
 
 /// Builds the full prototype ML-DSA-44 bit-heavy relation.
@@ -159,7 +159,7 @@ pub fn one_block_canonical_hint_hash_relation_for<P: MldsaParams>(
 /// c_tilde = SHAKE256(mu || w1Encode(w1_prime), 32)
 /// c = SampleInBall(c_tilde)
 /// ```
-pub fn full_bit_heavy_one_block_relation_for<P: MldsaParams>(
+pub fn full_bit_heavy_fixed_cap_relation_for<P: MldsaParams>(
 	builder: &CircuitBuilder,
 	c_tilde: &[Wire],
 	z_words: &[Wire],
@@ -169,7 +169,7 @@ pub fn full_bit_heavy_one_block_relation_for<P: MldsaParams>(
 ) -> MldsaBitHeavyCircuit<P> {
 	let z_packed_y = assert_z_packed_bytes_norm_for::<P>(builder, z_words);
 	let w1_prime = use_hint_for::<P>(builder, h_coeffs, w_approx_coeffs);
-	let sample_in_ball = one_block_w1encode_hash_sparse_relation_unchecked_w1_for::<P>(
+	let sample_in_ball = fixed_cap_w1encode_hash_sparse_relation_unchecked_w1_for::<P>(
 		builder, c_tilde, mu_words, &w1_prime,
 	);
 
@@ -182,7 +182,7 @@ pub fn full_bit_heavy_one_block_relation_for<P: MldsaParams>(
 }
 
 /// Full ML-DSA bit-heavy relation with canonical compressed hint decoding.
-pub fn full_bit_heavy_one_block_canonical_hint_relation_for<P: MldsaParams>(
+pub fn full_bit_heavy_fixed_cap_canonical_hint_relation_for<P: MldsaParams>(
 	builder: &CircuitBuilder,
 	c_tilde: &[Wire],
 	z_words: &[Wire],
@@ -193,7 +193,7 @@ pub fn full_bit_heavy_one_block_canonical_hint_relation_for<P: MldsaParams>(
 	let z_packed_y = assert_z_packed_bytes_norm_for::<P>(builder, z_words);
 	let h_coeffs = decode_hint_canonical_for::<P>(builder, h_words);
 	let w1_prime = use_hint_checked_for::<P>(builder, &h_coeffs, w_approx_coeffs);
-	let sample_in_ball = one_block_w1encode_hash_sparse_relation_unchecked_w1_for::<P>(
+	let sample_in_ball = fixed_cap_w1encode_hash_sparse_relation_unchecked_w1_for::<P>(
 		builder, c_tilde, mu_words, &w1_prime,
 	);
 
@@ -207,7 +207,7 @@ pub fn full_bit_heavy_one_block_canonical_hint_relation_for<P: MldsaParams>(
 
 /// Full ML-DSA bit-heavy relation with canonical compressed hint bytes and redundant expanded
 /// hidden hint bits.
-pub fn full_bit_heavy_one_block_canonical_hint_matched_relation_for<P: MldsaParams>(
+pub fn full_bit_heavy_fixed_cap_canonical_hint_matched_relation_for<P: MldsaParams>(
 	builder: &CircuitBuilder,
 	c_tilde: &[Wire],
 	z_words: &[Wire],
@@ -219,7 +219,7 @@ pub fn full_bit_heavy_one_block_canonical_hint_matched_relation_for<P: MldsaPara
 	let z_packed_y = assert_z_packed_bytes_norm_for::<P>(builder, z_words);
 	assert_hint_canonical_matches_expanded_for::<P>(builder, h_words, h_coeffs);
 	let w1_prime = use_hint_checked_for::<P>(builder, h_coeffs, w_approx_coeffs);
-	let sample_in_ball = one_block_w1encode_hash_sparse_relation_unchecked_w1_for::<P>(
+	let sample_in_ball = fixed_cap_w1encode_hash_sparse_relation_unchecked_w1_for::<P>(
 		builder, c_tilde, mu_words, &w1_prime,
 	);
 

@@ -4,8 +4,8 @@ use binius_frontend::Wire;
 
 use super::MldsaParams;
 
-/// ML-DSA one-block `SampleInBall` relation output plus private trace wires.
-pub struct MldsaSampleInBallOneBlock {
+/// ML-DSA fixed-cap `SampleInBall` relation output plus private trace wires.
+pub struct MldsaSampleInBallFixedCap {
 	/// Challenge polynomial coefficients encoded as unsigned 64-bit words: `0`, `1`, or `u64::MAX`
 	/// for `-1`.
 	pub coeffs: Vec<Wire>,
@@ -14,8 +14,8 @@ pub struct MldsaSampleInBallOneBlock {
 	pub draw_counts: Vec<Wire>,
 }
 
-/// Sparse ML-DSA one-block `SampleInBall` relation output plus private trace wires.
-pub struct MldsaSampleInBallOneBlockSparse {
+/// Sparse ML-DSA fixed-cap `SampleInBall` relation output plus private trace wires.
+pub struct MldsaSampleInBallFixedCapSparse {
 	/// Sparse challenge positions in update order.
 	pub positions: Vec<Wire>,
 	/// Sparse challenge signs encoded as unsigned 64-bit words: `1` or `u64::MAX` for `-1`.
@@ -32,6 +32,6 @@ pub struct MldsaBitHeavyCircuit<P: MldsaParams> {
 	/// Hidden `w1_prime = UseHint(h, wApprox)` coefficients.
 	pub w1_prime: Vec<Wire>,
 	/// Hidden sparse challenge polynomial plus private sampler trace.
-	pub sample_in_ball: MldsaSampleInBallOneBlockSparse,
+	pub sample_in_ball: MldsaSampleInBallFixedCapSparse,
 	pub(crate) _params: std::marker::PhantomData<P>,
 }

@@ -19,7 +19,7 @@ pub trait MldsaParams {
 	const POLY_Z_PACKED_BYTES: usize;
 	const Z_BITS_PER_COEFF: usize;
 	const SAMPLE_IN_BALL_SIGN_BYTES: usize;
-	const SAMPLE_IN_BALL_ONE_BLOCK_DRAW_CAP_BYTES: usize;
+	const SAMPLE_IN_BALL_DRAW_CAP_BYTES: usize;
 
 	const OMEGA_USIZE: usize = Self::OMEGA as usize;
 	const TWO_GAMMA2: u64 = 2 * Self::GAMMA2;
@@ -37,8 +37,8 @@ pub trait MldsaParams {
 	const Z_COEFFICIENTS: usize = Self::L * Self::N;
 	const Z_PACKED_BYTES: usize = Self::L * Self::POLY_Z_PACKED_BYTES;
 	const Z_PACKED_WORDS: usize = Self::Z_PACKED_BYTES / 8;
-	const SAMPLE_IN_BALL_ONE_BLOCK_STREAM_BYTES: usize =
-		Self::SAMPLE_IN_BALL_SIGN_BYTES + Self::SAMPLE_IN_BALL_ONE_BLOCK_DRAW_CAP_BYTES;
+	const SAMPLE_IN_BALL_STREAM_BYTES: usize =
+		Self::SAMPLE_IN_BALL_SIGN_BYTES + Self::SAMPLE_IN_BALL_DRAW_CAP_BYTES;
 
 	fn label() -> &'static str;
 }
@@ -84,10 +84,10 @@ pub mod mldsa44 {
 	pub const Z_PACKED_WORDS: usize = Z_PACKED_BYTES / 8;
 
 	pub const SAMPLE_IN_BALL_SIGN_BYTES: usize = 8;
-	pub const SAMPLE_IN_BALL_ONE_BLOCK_DRAW_CAP_BYTES: usize = 128;
-	pub const SAMPLE_IN_BALL_ONE_BLOCK_STREAM_BYTES: usize =
-		SAMPLE_IN_BALL_SIGN_BYTES + SAMPLE_IN_BALL_ONE_BLOCK_DRAW_CAP_BYTES;
-	pub const SAMPLE_IN_BALL_ONE_BLOCK_KECCAK_F_CALLS: usize = 1;
+	pub const SAMPLE_IN_BALL_DRAW_CAP_BYTES: usize = 128;
+	pub const SAMPLE_IN_BALL_STREAM_BYTES: usize =
+		SAMPLE_IN_BALL_SIGN_BYTES + SAMPLE_IN_BALL_DRAW_CAP_BYTES;
+	pub const SAMPLE_IN_BALL_KECCAK_F_CALLS: usize = 1;
 }
 
 /// ML-DSA-65 constants.
@@ -127,9 +127,9 @@ pub mod mldsa65 {
 	pub const Z_PACKED_WORDS: usize = Z_PACKED_BYTES / 8;
 
 	pub const SAMPLE_IN_BALL_SIGN_BYTES: usize = 8;
-	pub const SAMPLE_IN_BALL_ONE_BLOCK_DRAW_CAP_BYTES: usize = 128;
-	pub const SAMPLE_IN_BALL_ONE_BLOCK_STREAM_BYTES: usize =
-		SAMPLE_IN_BALL_SIGN_BYTES + SAMPLE_IN_BALL_ONE_BLOCK_DRAW_CAP_BYTES;
+	pub const SAMPLE_IN_BALL_DRAW_CAP_BYTES: usize = 149;
+	pub const SAMPLE_IN_BALL_STREAM_BYTES: usize =
+		SAMPLE_IN_BALL_SIGN_BYTES + SAMPLE_IN_BALL_DRAW_CAP_BYTES;
 }
 
 /// ML-DSA-87 constants.
@@ -169,9 +169,9 @@ pub mod mldsa87 {
 	pub const Z_PACKED_WORDS: usize = Z_PACKED_BYTES / 8;
 
 	pub const SAMPLE_IN_BALL_SIGN_BYTES: usize = 8;
-	pub const SAMPLE_IN_BALL_ONE_BLOCK_DRAW_CAP_BYTES: usize = 128;
-	pub const SAMPLE_IN_BALL_ONE_BLOCK_STREAM_BYTES: usize =
-		SAMPLE_IN_BALL_SIGN_BYTES + SAMPLE_IN_BALL_ONE_BLOCK_DRAW_CAP_BYTES;
+	pub const SAMPLE_IN_BALL_DRAW_CAP_BYTES: usize = 264;
+	pub const SAMPLE_IN_BALL_STREAM_BYTES: usize =
+		SAMPLE_IN_BALL_SIGN_BYTES + SAMPLE_IN_BALL_DRAW_CAP_BYTES;
 }
 
 /// Marker type for the ML-DSA-44 parameter set.
@@ -195,8 +195,7 @@ impl MldsaParams for Mldsa44 {
 	const POLY_Z_PACKED_BYTES: usize = mldsa44::POLY_Z_PACKED_BYTES;
 	const Z_BITS_PER_COEFF: usize = mldsa44::Z_BITS_PER_COEFF;
 	const SAMPLE_IN_BALL_SIGN_BYTES: usize = mldsa44::SAMPLE_IN_BALL_SIGN_BYTES;
-	const SAMPLE_IN_BALL_ONE_BLOCK_DRAW_CAP_BYTES: usize =
-		mldsa44::SAMPLE_IN_BALL_ONE_BLOCK_DRAW_CAP_BYTES;
+	const SAMPLE_IN_BALL_DRAW_CAP_BYTES: usize = mldsa44::SAMPLE_IN_BALL_DRAW_CAP_BYTES;
 
 	fn label() -> &'static str {
 		"mldsa44"
@@ -224,8 +223,7 @@ impl MldsaParams for Mldsa65 {
 	const POLY_Z_PACKED_BYTES: usize = mldsa65::POLY_Z_PACKED_BYTES;
 	const Z_BITS_PER_COEFF: usize = mldsa65::Z_BITS_PER_COEFF;
 	const SAMPLE_IN_BALL_SIGN_BYTES: usize = mldsa65::SAMPLE_IN_BALL_SIGN_BYTES;
-	const SAMPLE_IN_BALL_ONE_BLOCK_DRAW_CAP_BYTES: usize =
-		mldsa65::SAMPLE_IN_BALL_ONE_BLOCK_DRAW_CAP_BYTES;
+	const SAMPLE_IN_BALL_DRAW_CAP_BYTES: usize = mldsa65::SAMPLE_IN_BALL_DRAW_CAP_BYTES;
 
 	fn label() -> &'static str {
 		"mldsa65"
@@ -253,8 +251,7 @@ impl MldsaParams for Mldsa87 {
 	const POLY_Z_PACKED_BYTES: usize = mldsa87::POLY_Z_PACKED_BYTES;
 	const Z_BITS_PER_COEFF: usize = mldsa87::Z_BITS_PER_COEFF;
 	const SAMPLE_IN_BALL_SIGN_BYTES: usize = mldsa87::SAMPLE_IN_BALL_SIGN_BYTES;
-	const SAMPLE_IN_BALL_ONE_BLOCK_DRAW_CAP_BYTES: usize =
-		mldsa87::SAMPLE_IN_BALL_ONE_BLOCK_DRAW_CAP_BYTES;
+	const SAMPLE_IN_BALL_DRAW_CAP_BYTES: usize = mldsa87::SAMPLE_IN_BALL_DRAW_CAP_BYTES;
 
 	fn label() -> &'static str {
 		"mldsa87"

@@ -27,15 +27,15 @@ pub use packing::{
 };
 pub use params::{Mldsa44, Mldsa65, Mldsa87, MldsaParams, mldsa44, mldsa65, mldsa87};
 pub use relations::{
-	full_bit_heavy_one_block_canonical_hint_matched_relation_for,
-	full_bit_heavy_one_block_canonical_hint_relation_for, full_bit_heavy_one_block_relation_for,
-	one_block_canonical_hint_hash_relation_for, one_block_hidden_hash_relation_for,
-	one_block_use_hint_hash_relation_for, one_block_w1encode_hash_relation_for,
+	fixed_cap_canonical_hint_hash_relation_for, fixed_cap_hidden_hash_relation_for,
+	fixed_cap_use_hint_hash_relation_for, fixed_cap_w1encode_hash_relation_for,
+	full_bit_heavy_fixed_cap_canonical_hint_matched_relation_for,
+	full_bit_heavy_fixed_cap_canonical_hint_relation_for, full_bit_heavy_fixed_cap_relation_for,
 };
 pub use sample_in_ball::{
-	sample_in_ball_one_block_for, sample_in_ball_one_block_from_stream_for,
-	sample_in_ball_one_block_sparse_for, sample_in_ball_one_block_sparse_from_stream_for,
-	sample_in_ball_one_block_stream_for,
+	sample_in_ball_fixed_cap_for, sample_in_ball_fixed_cap_from_stream_for,
+	sample_in_ball_fixed_cap_sparse_for, sample_in_ball_fixed_cap_sparse_from_stream_for,
+	sample_in_ball_fixed_cap_stream_for,
 };
-pub use types::{MldsaBitHeavyCircuit, MldsaSampleInBallOneBlock, MldsaSampleInBallOneBlockSparse};
+pub use types::{MldsaBitHeavyCircuit, MldsaSampleInBallFixedCap, MldsaSampleInBallFixedCapSparse};
 pub use use_hint::{high_bits_for, use_hint_coeff_for, use_hint_for};
