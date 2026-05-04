@@ -637,10 +637,28 @@ KECCAK_SPARTAN_OUTER_ONE_FS_CHUNK_PERMS=<chunk size>
 KECCAK_SPARTAN_OUTER_ONE_FS_JOBS=<parallel chunk jobs>
 ```
 
+The chunk size can also be selected by the benchmark heuristic:
+
+```text
+KECCAK_SPARTAN_OUTER_ONE_FS_CHUNK_PERMS=auto
+```
+
+Auto mode considers power-of-two chunk sizes in:
+
+```text
+KECCAK_SPARTAN_OUTER_ONE_FS_AUTO_MIN_CHUNK_PERMS=1024
+KECCAK_SPARTAN_OUTER_ONE_FS_AUTO_MAX_CHUNK_PERMS=8192
+```
+
+and scores them by estimated local-domain work per wave, plus penalties for the chunk-axis tail and
+too many chunks. It currently uses two inner workers per chunk and the requested
+`KECCAK_SPARTAN_OUTER_ONE_FS_JOBS` as the coarse parallelism cap. This is deliberately a benchmark
+heuristic, not a final protocol parameter.
+
 with benchmark name:
 
 ```text
-prove_packed_persistent_fused_one_fs_<jobs>_jobs_<chunk>_per_chunk
+prove_packed_persistent_fused_one_fs_<manual|auto>_<jobs>_jobs_<chunk>_per_chunk
 ```
 
 This benchmark keeps a single logical Fiat-Shamir timeline. It uses the variable order:
@@ -701,6 +719,30 @@ This is the result we wanted: almost the same speed as the independent multi-ins
 without giving chunks independent Fiat-Shamir challenges. The implementation is still benchmark
 infrastructure, not a finished verifier-integrated protocol path, but it strongly supports the
 chunk-local table layout with one global transcript.
+
+Loaded Mac M4 Max runs on 2026-05-03 were noisy but directionally consistent. The machine reported
+12 performance cores and 4 efficiency cores, with load averages around 19/41/45 during the sweep.
+At 32,768 permutations:
+
+| Shape | Median time | Notes |
+|---|---:|---|
+| Monolithic packed persistent, 12 workers | 131-133 ms | wide confidence intervals under load |
+| One-FS chunked, 8,192-perm chunks, 4 jobs | 98.0 ms | stable-ish |
+| One-FS chunked, 4,096-perm chunks, 8 jobs | 77.5 ms first run, 105.9 ms repeat | fastest sample, noisy repeat |
+| One-FS chunked, 2,048-perm chunks, 8 jobs | 102.6 ms | noisy |
+| One-FS chunked, 1,024-perm chunks, 12 jobs | 134.3 ms | too much overhead on this run |
+
+Larger Mac runs gave longer iterations and cleaner scaling signal:
+
+| Total permutations | Auto-selected chunk | One-FS auto median | Monolithic median |
+|---:|---:|---:|---:|
+| 65,536 | 8,192 | 156.2 ms | 226.9 ms |
+| 131,072 | 8,192 | 283.2 ms | 639.8 ms |
+
+Manual large-size checks under the same load suggested 8,192-permutation chunks were more stable
+than 4,096-permutation chunks on this Mac at 65k-131k. This differs from `leopard`, where
+2,048-permutation chunks were best at 32k. That difference is the main reason to keep adaptive
+chunk selection rather than baking in one chunk size.
 
 ## Full-Path Checkpoint
 

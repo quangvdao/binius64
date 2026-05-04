@@ -759,23 +759,33 @@ fn bench_keccak_spartan_outer_scale(c: &mut Criterion) {
 			);
 		}
 
-		if let Some(chunk_perms) = spartan_outer_one_fs_chunk_perms()
+		if let Some(config) = spartan_outer_one_fs_config(total_perms)
+			&& let OneFsChunkConfig {
+				chunk_perms,
+				jobs,
+				inner_workers,
+				min_words_per_worker,
+				label,
+			} = config
 			&& total_perms > chunk_perms
 		{
+			set_bench_env_var("KECCAK_OUTER_WORKERS", inner_workers.to_string());
+			set_bench_env_var(
+				"KECCAK_PACKED_OUTER_MIN_WORDS_PER_WORKER",
+				min_words_per_worker.to_string(),
+			);
 			let one_fs =
 				spartan_outer_one_fs_chunks(total_perms, chunk_perms, first_round_challenge);
 			if spartan_outer_one_fs_verify() {
 				verify_one_fs_chunked_matches_permuted_generic(&one_fs);
 			}
-			let jobs = spartan_outer_one_fs_jobs()
-				.min(one_fs.instances.len())
-				.max(1);
+			let jobs = jobs.min(one_fs.instances.len()).max(1);
 			group.throughput(Throughput::Elements(total_constraints as u64));
 			group.bench_function(
 				BenchmarkId::new(
 					format!(
-						"prove_packed_persistent_fused_one_fs_{}_jobs_{}_per_chunk",
-						jobs, chunk_perms
+						"prove_packed_persistent_fused_one_fs_{}_{}_jobs_{}_per_chunk",
+						label, jobs, chunk_perms
 					),
 					total_perms,
 				),
@@ -785,6 +795,15 @@ fn bench_keccak_spartan_outer_scale(c: &mut Criterion) {
 			);
 		}
 	}
+}
+
+#[derive(Clone)]
+struct OneFsChunkConfig {
+	chunk_perms: usize,
+	jobs: usize,
+	inner_workers: usize,
+	min_words_per_worker: usize,
+	label: String,
 }
 
 struct SpartanOuterOneFsChunks {
@@ -797,13 +816,76 @@ struct SpartanOuterOneFsChunks {
 	folded_claim: B128,
 }
 
-fn spartan_outer_one_fs_chunk_perms() -> Option<usize> {
-	env::var("KECCAK_SPARTAN_OUTER_ONE_FS_CHUNK_PERMS")
-		.ok()
-		.map(|value| {
-			value
-				.parse::<usize>()
-				.expect("KECCAK_SPARTAN_OUTER_ONE_FS_CHUNK_PERMS must be a usize")
+fn spartan_outer_one_fs_config(total_perms: usize) -> Option<OneFsChunkConfig> {
+	let chunk_value = env::var("KECCAK_SPARTAN_OUTER_ONE_FS_CHUNK_PERMS").ok()?;
+	if chunk_value == "auto" {
+		Some(spartan_outer_one_fs_auto_config(total_perms))
+	} else {
+		let chunk_perms = chunk_value
+			.parse::<usize>()
+			.expect("KECCAK_SPARTAN_OUTER_ONE_FS_CHUNK_PERMS must be a usize or 'auto'");
+		let jobs = spartan_outer_one_fs_jobs()
+			.min(total_perms / chunk_perms)
+			.max(1);
+		let inner_workers = spartan_outer_one_fs_inner_workers();
+		Some(OneFsChunkConfig {
+			chunk_perms,
+			jobs,
+			inner_workers,
+			min_words_per_worker: spartan_outer_one_fs_min_words_per_worker(chunk_perms),
+			label: "manual".to_string(),
+		})
+	}
+}
+
+fn spartan_outer_one_fs_auto_config(total_perms: usize) -> OneFsChunkConfig {
+	let available = thread::available_parallelism()
+		.map(usize::from)
+		.unwrap_or(1);
+	let jobs_hint = spartan_outer_one_fs_jobs().min(available).max(1);
+	let mut candidates = Vec::new();
+	let min_chunk_perms = spartan_outer_one_fs_auto_min_chunk_perms();
+	let max_chunk_perms = spartan_outer_one_fs_auto_max_chunk_perms().min(total_perms / 2);
+	let mut chunk_perms = min_chunk_perms.next_power_of_two();
+	while chunk_perms <= max_chunk_perms {
+		if total_perms % chunk_perms == 0 {
+			let chunks = total_perms / chunk_perms;
+			if chunks.is_power_of_two() && chunks >= 2 {
+				let jobs = jobs_hint.min(chunks).max(1);
+				let waves = chunks.div_ceil(jobs);
+				let local_rows = chunk_perms * KECCAK_ROUNDS_PER_PERM * KECCAK_LANES_PER_ROUND;
+				let local_log_rows = local_rows.next_power_of_two().ilog2() as usize;
+				let chunk_axis_rows = chunks;
+				let score = waves * (1usize << local_log_rows)
+					+ chunk_axis_rows.next_power_of_two() * 8
+					+ chunks * 4096;
+				candidates.push((
+					score,
+					OneFsChunkConfig {
+						chunk_perms,
+						jobs,
+						inner_workers: 2,
+						min_words_per_worker: spartan_outer_one_fs_min_words_per_worker(
+							chunk_perms,
+						),
+						label: "auto".to_string(),
+					},
+				));
+			}
+		}
+		chunk_perms <<= 1;
+	}
+
+	candidates
+		.into_iter()
+		.min_by_key(|(score, _)| *score)
+		.map(|(_, config)| config)
+		.unwrap_or_else(|| OneFsChunkConfig {
+			chunk_perms: total_perms,
+			jobs: 1,
+			inner_workers: spartan_outer_one_fs_inner_workers(),
+			min_words_per_worker: spartan_outer_one_fs_min_words_per_worker(total_perms),
+			label: "auto".to_string(),
 		})
 }
 
@@ -819,6 +901,42 @@ fn spartan_outer_one_fs_jobs() -> usize {
 		.and_then(|value| value.parse().ok())
 		.or_else(|| thread::available_parallelism().ok().map(usize::from))
 		.unwrap_or(1)
+}
+
+fn spartan_outer_one_fs_inner_workers() -> usize {
+	env::var("KECCAK_SPARTAN_OUTER_ONE_FS_INNER_WORKERS")
+		.ok()
+		.and_then(|value| value.parse().ok())
+		.unwrap_or(2)
+}
+
+fn spartan_outer_one_fs_min_words_per_worker(chunk_perms: usize) -> usize {
+	env::var("KECCAK_SPARTAN_OUTER_ONE_FS_MIN_WORDS_PER_WORKER")
+		.ok()
+		.and_then(|value| value.parse().ok())
+		.unwrap_or_else(|| chunk_perms.clamp(1024, 4096))
+}
+
+fn spartan_outer_one_fs_auto_min_chunk_perms() -> usize {
+	env::var("KECCAK_SPARTAN_OUTER_ONE_FS_AUTO_MIN_CHUNK_PERMS")
+		.ok()
+		.and_then(|value| value.parse().ok())
+		.unwrap_or(1024)
+}
+
+fn spartan_outer_one_fs_auto_max_chunk_perms() -> usize {
+	env::var("KECCAK_SPARTAN_OUTER_ONE_FS_AUTO_MAX_CHUNK_PERMS")
+		.ok()
+		.and_then(|value| value.parse().ok())
+		.unwrap_or(8192)
+}
+
+fn set_bench_env_var(key: &str, value: String) {
+	// SAFETY: Criterion benchmarks run single-threaded during setup before the benchmark closure
+	// starts spawning worker threads.
+	unsafe {
+		env::set_var(key, value);
+	}
 }
 
 fn spartan_outer_one_fs_chunks(
