@@ -28,6 +28,8 @@ pub enum Error {
 	Sumcheck(#[from] sumcheck::Error),
 	#[error("incorrect public inputs length: expected {expected}, got {actual}")]
 	IncorrectPublicInputLength { expected: usize, actual: usize },
+	#[error("repeated constraint-system descriptor is incompatible with the flat verifier shape")]
+	RepeatedShapeMismatch,
 	#[error("constraint system error: {0}")]
 	ConstraintSystem(#[from] ConstraintSystemError),
 	#[error("invalid proof: {0}")]

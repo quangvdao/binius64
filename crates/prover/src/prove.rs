@@ -13,6 +13,7 @@ use binius_iop_prover::{
 	basefold_channel::BaseFoldProverChannel, basefold_compiler::BaseFoldProverCompiler,
 	channel::IOPProverChannel,
 };
+use binius_ip_prover::channel::IPProverChannel;
 use binius_math::{
 	BinarySubspace, FieldBuffer, FieldSlice,
 	inner_product::inner_product,
@@ -23,7 +24,7 @@ use binius_math::{
 use binius_transcript::{ProverTranscript, fiat_shamir::Challenger};
 use binius_utils::{SerializeBytes, checked_arithmetics::checked_log_2, rayon::prelude::*};
 use binius_verifier::{
-	IOPVerifier, Verifier,
+	IOPVerifier, RepeatedConstraintSystem, Verifier,
 	config::{
 		B1, B128, LOG_WORD_SIZE_BITS, LOG_WORDS_PER_ELEM, PROVER_SMALL_FIELD_ZEROCHECK_CHALLENGES,
 	},
@@ -372,6 +373,19 @@ where
 		let channel = BaseFoldProverChannel::from_compiler(&self.basefold_compiler, transcript);
 		self.iop_prover.prove::<P, _>(witness, channel)
 	}
+
+	/// Proves a flat repeated-circuit witness while binding the repeated descriptor into the
+	/// transcript before public inputs.
+	pub fn prove_repeated<Challenger_: Challenger>(
+		&self,
+		repeated: &RepeatedConstraintSystem,
+		witness: ValueVec,
+		transcript: &mut ProverTranscript<Challenger_>,
+	) -> Result<(), Error> {
+		let mut channel = BaseFoldProverChannel::from_compiler(&self.basefold_compiler, transcript);
+		channel.observe_many(&repeated.binding_scalars());
+		self.iop_prover.prove::<P, _>(witness, channel)
+	}
 }
 
 /// Batches the pubcheck transparent polynomial with the ring-switch equality indicator.
@@ -583,7 +597,7 @@ mod tests {
 	use binius_field::arch::OptimalPackedB128;
 	use binius_transcript::ProverTranscript;
 	use binius_verifier::{
-		Verifier,
+		RepeatedConstraintSystem, Verifier,
 		config::StdChallenger,
 		hash::{StdCompression, StdDigest},
 	};
@@ -750,6 +764,102 @@ mod tests {
 		.expect("zero value vector has matching layout")
 	}
 
+	fn setup_repeated_fixture(
+		base_constraint_count: usize,
+		base_value_count: usize,
+		log_instances: usize,
+	) -> (
+		RepeatedConstraintSystem,
+		ConstraintSystem,
+		ValueVec,
+		Verifier<StdDigest, StdCompression>,
+		Prover<OptimalPackedB128, ParallelCompressionAdaptor<StdCompression>, StdDigest>,
+	) {
+		const LOG_INV_RATE: usize = 1;
+
+		let base_constraint_system =
+			make_base_constraint_system(base_constraint_count, base_value_count);
+		let repeated = RepeatedConstraintSystem::new(base_constraint_system.clone(), log_instances);
+		let flat_constraint_system =
+			make_flat_repeated_constraint_system(&base_constraint_system, log_instances);
+		let value_vec = zero_value_vec(&flat_constraint_system);
+		verify_constraints(&flat_constraint_system, &value_vec)
+			.expect("zero witness satisfies the repeated toy circuit");
+
+		let verifier = Verifier::<StdDigest, _>::setup(
+			flat_constraint_system.clone(),
+			LOG_INV_RATE,
+			StdCompression::default(),
+		)
+		.expect("flat verifier setup succeeds");
+		let prover = Prover::<OptimalPackedB128, _, StdDigest>::setup(
+			verifier.clone(),
+			ParallelCompressionAdaptor::new(StdCompression::default()),
+		)
+		.expect("flat prover setup succeeds");
+
+		(repeated, flat_constraint_system, value_vec, verifier, prover)
+	}
+
+	#[test]
+	fn repeated_verifier_accepts_bound_flat_proof() {
+		let (repeated, _, value_vec, verifier, prover) = setup_repeated_fixture(1 << 4, 1 << 5, 2);
+
+		let mut prover_transcript = ProverTranscript::new(StdChallenger::default());
+		prover
+			.prove_repeated(&repeated, value_vec.clone(), &mut prover_transcript)
+			.expect("repeated-bound flat prover succeeds");
+
+		let mut verifier_transcript = prover_transcript.into_verifier();
+		verifier
+			.verify_repeated(value_vec.public(), &repeated, &mut verifier_transcript)
+			.expect("repeated verifier accepts");
+		verifier_transcript
+			.finalize()
+			.expect("repeated transcript is exhausted");
+	}
+
+	#[test]
+	fn repeated_verifier_rejects_wrong_log_instances() {
+		let (repeated, _, value_vec, verifier, prover) = setup_repeated_fixture(1 << 4, 1 << 5, 2);
+		let wrong_repeated =
+			RepeatedConstraintSystem::new(repeated.base().clone(), repeated.log_instances() + 1);
+
+		let mut prover_transcript = ProverTranscript::new(StdChallenger::default());
+		prover
+			.prove_repeated(&repeated, value_vec.clone(), &mut prover_transcript)
+			.expect("repeated-bound flat prover succeeds");
+
+		let mut verifier_transcript = prover_transcript.into_verifier();
+		assert!(
+			verifier
+				.verify_repeated(value_vec.public(), &wrong_repeated, &mut verifier_transcript)
+				.is_err()
+		);
+	}
+
+	#[test]
+	fn repeated_verifier_rejects_wrong_base_shape_binding() {
+		let (repeated, _, value_vec, verifier, prover) = setup_repeated_fixture(1 << 4, 1 << 5, 2);
+		let wrong_repeated = {
+			let mut base = repeated.base().clone();
+			base.and_constraints[0].a.swap(0, 1);
+			RepeatedConstraintSystem::new(base, repeated.log_instances())
+		};
+
+		let mut prover_transcript = ProverTranscript::new(StdChallenger::default());
+		prover
+			.prove_repeated(&repeated, value_vec.clone(), &mut prover_transcript)
+			.expect("repeated-bound flat prover succeeds");
+
+		let mut verifier_transcript = prover_transcript.into_verifier();
+		assert!(
+			verifier
+				.verify_repeated(value_vec.public(), &wrong_repeated, &mut verifier_transcript)
+				.is_err()
+		);
+	}
+
 	#[test]
 	#[ignore = "prints end-to-end flat verifier vs repeated verifier runtimes"]
 	fn repeated_e2e_verifier_print_runtimes() {
@@ -771,6 +881,8 @@ mod tests {
 		);
 
 		for log_instances in [0usize, 4, 8, 10] {
+			let repeated =
+				RepeatedConstraintSystem::new(base_constraint_system.clone(), log_instances);
 			let flat_constraint_system =
 				make_flat_repeated_constraint_system(&base_constraint_system, log_instances);
 			let value_vec = zero_value_vec(&flat_constraint_system);
@@ -789,17 +901,24 @@ mod tests {
 			)
 			.expect("flat prover setup succeeds");
 
-			let (prover_transcript, prove_elapsed) = elapsed_for(|| {
+			let (flat_prover_transcript, prove_elapsed) = elapsed_for(|| {
 				let mut prover_transcript = ProverTranscript::new(StdChallenger::default());
 				prover
 					.prove(value_vec.clone(), &mut prover_transcript)
 					.expect("flat prover succeeds");
 				prover_transcript
 			});
+			let repeated_prover_transcript = {
+				let mut prover_transcript = ProverTranscript::new(StdChallenger::default());
+				prover
+					.prove_repeated(&repeated, value_vec.clone(), &mut prover_transcript)
+					.expect("repeated-bound flat prover succeeds");
+				prover_transcript
+			};
 
 			let verify_iterations = if log_instances >= 8 { 8 } else { 32 };
 			let flat_verify_elapsed = average_elapsed(verify_iterations, || {
-				let mut verifier_transcript = prover_transcript.clone().into_verifier();
+				let mut verifier_transcript = flat_prover_transcript.clone().into_verifier();
 				verifier
 					.verify(value_vec.public(), &mut verifier_transcript)
 					.expect("flat verifier accepts");
@@ -809,14 +928,9 @@ mod tests {
 			});
 
 			let repeated_verify_elapsed = average_elapsed(verify_iterations, || {
-				let mut verifier_transcript = prover_transcript.clone().into_verifier();
+				let mut verifier_transcript = repeated_prover_transcript.clone().into_verifier();
 				verifier
-					.verify_repeated(
-						value_vec.public(),
-						&base_constraint_system,
-						log_instances,
-						&mut verifier_transcript,
-					)
+					.verify_repeated(value_vec.public(), &repeated, &mut verifier_transcript)
 					.expect("repeated verifier accepts");
 				verifier_transcript
 					.finalize()

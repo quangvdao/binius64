@@ -36,6 +36,7 @@
 pub mod config;
 mod error;
 pub mod protocols;
+mod repeated;
 pub mod ring_switch;
 mod verify;
 pub mod zk_config;
@@ -44,4 +45,5 @@ pub use binius_hash as hash;
 pub use binius_iop::{fri, merkle_tree};
 pub use binius_transcript as transcript;
 pub use error::*;
+pub use repeated::*;
 pub use verify::*;

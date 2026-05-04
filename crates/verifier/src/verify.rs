@@ -34,6 +34,7 @@ use crate::{
 		intmul::{IntMulOutput, verify as verify_intmul_reduction},
 		shift::{self, OperatorData},
 	},
+	repeated::RepeatedConstraintSystem,
 	ring_switch,
 };
 
@@ -272,14 +273,16 @@ impl IOPVerifier {
 	pub fn verify_repeated<Channel>(
 		&self,
 		public: &[Word],
-		base_constraint_system: &ConstraintSystem,
-		log_instances: usize,
+		repeated: &RepeatedConstraintSystem,
 		channel: &mut Channel,
 	) -> Result<(), Error>
 	where
 		Channel: IOPVerifierChannel<B128>,
 		Channel::Elem: FieldOps<Scalar = B128> + From<B128>,
 	{
+		if !repeated.matches_flat_shape(&self.constraint_system) {
+			return Err(Error::RepeatedShapeMismatch);
+		}
 		if public.len() != 1 << self.log_public_words() {
 			return Err(Error::IncorrectPublicInputLength {
 				expected: 1 << self.log_public_words(),
@@ -287,6 +290,7 @@ impl IOPVerifier {
 			});
 		}
 
+		channel.observe_many(&repeated.binding_scalars());
 		let public_elems = channel.observe_many(&encode_public(public));
 
 		let _verify_guard = tracing::info_span!(
@@ -306,12 +310,12 @@ impl IOPVerifier {
 			"[phase] Verify IntMul Reduction",
 			phase = "verify_intmul_reduction",
 			perfetto_category = "phase",
-			base_constraints = base_constraint_system.n_mul_constraints(),
-			log_instances
+			base_constraints = repeated.base().n_mul_constraints(),
+			log_instances = repeated.log_instances()
 		)
 		.entered();
 		let log_n_constraints =
-			checked_log_2(base_constraint_system.n_mul_constraints()) + log_instances;
+			checked_log_2(repeated.base().n_mul_constraints()) + repeated.log_instances();
 		let intmul_output =
 			verify_intmul_reduction::<B128, _>(LOG_WORD_SIZE_BITS, log_n_constraints, channel)?;
 		drop(intmul_guard);
@@ -320,13 +324,13 @@ impl IOPVerifier {
 			"[phase] Verify BitAnd Reduction",
 			phase = "verify_bitand_reduction",
 			perfetto_category = "phase",
-			base_constraints = base_constraint_system.n_and_constraints(),
-			log_instances
+			base_constraints = repeated.base().n_and_constraints(),
+			log_instances = repeated.log_instances()
 		)
 		.entered();
 		let bitand_claim = {
 			let log_n_constraints =
-				checked_log_2(base_constraint_system.n_and_constraints()) + log_instances;
+				checked_log_2(repeated.base().n_and_constraints()) + repeated.log_instances();
 			let AndCheckOutput {
 				a_eval,
 				b_eval,
@@ -368,13 +372,7 @@ impl IOPVerifier {
 			perfetto_category = "phase"
 		)
 		.entered();
-		let shift_output = shift::verify_repeated(
-			base_constraint_system,
-			log_instances,
-			&bitand_claim,
-			&intmul_claim,
-			channel,
-		)?;
+		let shift_output = shift::verify_repeated(repeated, &bitand_claim, &intmul_claim, channel)?;
 		drop(constraint_guard);
 
 		let public_guard = tracing::info_span!(
@@ -384,8 +382,7 @@ impl IOPVerifier {
 		)
 		.entered();
 		shift::check_eval_repeated(
-			base_constraint_system,
-			log_instances,
+			repeated,
 			&bitand_claim,
 			&intmul_claim,
 			&domain_subspace,
@@ -565,17 +562,12 @@ where
 	pub fn verify_repeated<Challenger_: Challenger>(
 		&self,
 		public: &[Word],
-		base_constraint_system: &ConstraintSystem,
-		log_instances: usize,
+		repeated: &RepeatedConstraintSystem,
 		transcript: &mut VerifierTranscript<Challenger_>,
 	) -> Result<(), Error> {
 		let mut channel = self.iop_compiler.create_channel(transcript);
-		self.iop_verifier.verify_repeated(
-			public,
-			base_constraint_system,
-			log_instances,
-			&mut channel,
-		)
+		self.iop_verifier
+			.verify_repeated(public, repeated, &mut channel)
 	}
 }
 

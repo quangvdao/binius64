@@ -23,6 +23,7 @@ bytes.workspace = true
 digest.workspace = true
 getset.workspace = true
 itertools.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
@@ -30,4 +31,3 @@ tracing.workspace = true
 binius-math = { path = "../math", features = ["test-utils"] }
 rand.workspace = true
 itertools.workspace = true
-sha2.workspace = true

@@ -16,6 +16,7 @@ use super::{
 use crate::{
 	config::LOG_WORD_SIZE_BITS,
 	protocols::sumcheck::{SumcheckOutput, verify as verify_sumcheck},
+	repeated::RepeatedConstraintSystem,
 };
 
 /// Verifier data for an operation with the specified arity.
@@ -162,8 +163,7 @@ where
 /// The caller remains responsible for binding the base circuit digest, repeated layout, and
 /// `log_instances` into the outer transcript before these challenges are sampled.
 pub fn verify_repeated<F, C>(
-	base_constraint_system: &ConstraintSystem,
-	log_instances: usize,
+	repeated: &RepeatedConstraintSystem,
 	bitand_data: &OperatorData<C::Elem, BITAND_ARITY>,
 	intmul_data: &OperatorData<C::Elem, INTMUL_ARITY>,
 	channel: &mut C,
@@ -172,12 +172,11 @@ where
 	F: BinaryField,
 	C: IPVerifierChannel<F>,
 {
-	let base_log_word_count =
-		strict_log_2(base_constraint_system.value_vec_layout.committed_total_len)
-			.expect("base constraints preprocessed");
+	let base_log_word_count = strict_log_2(repeated.base().value_vec_layout.committed_total_len)
+		.expect("base constraints preprocessed");
 
 	verify_with_log_word_count(
-		base_log_word_count + log_instances,
+		base_log_word_count + repeated.log_instances(),
 		bitand_data,
 		intmul_data,
 		channel,
@@ -330,8 +329,7 @@ where
 /// The base constraint system must use local value indices. Concrete per-instance public values
 /// belong in public slots or committed public-data rows, not in the base constants vector.
 pub fn check_eval_repeated<F, C>(
-	base_constraint_system: &ConstraintSystem,
-	log_instances: usize,
+	repeated: &RepeatedConstraintSystem,
 	bitand_data: &OperatorData<C::Elem, BITAND_ARITY>,
 	intmul_data: &OperatorData<C::Elem, INTMUL_ARITY>,
 	subspace: &BinarySubspace<F>,
@@ -353,6 +351,7 @@ where
 		witness_eval,
 	} = output;
 
+	let base_constraint_system = repeated.base();
 	let base_value_count = base_constraint_system.value_vec_layout.committed_total_len;
 
 	let monster_eval_for_bitand = {
@@ -370,7 +369,7 @@ where
 			r_s,
 			r_y,
 			RepeatedMonsterLayout::new(
-				log_instances,
+				repeated.log_instances(),
 				base_constraint_system.and_constraints.len(),
 				base_value_count,
 			),
@@ -391,7 +390,7 @@ where
 			r_s,
 			r_y,
 			RepeatedMonsterLayout::new(
-				log_instances,
+				repeated.log_instances(),
 				base_constraint_system.mul_constraints.len(),
 				base_value_count,
 			),
