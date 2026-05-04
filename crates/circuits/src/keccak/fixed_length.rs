@@ -7,6 +7,9 @@ use super::{
 	N_WORDS_PER_BLOCK, N_WORDS_PER_DIGEST, N_WORDS_PER_STATE, RATE_BYTES, permutation::Permutation,
 };
 
+const KECCAK_256_SUFFIX: u8 = 0x01;
+const SHAKE_SUFFIX: u8 = 0x1F;
+
 /// Computes the Keccak-256 hash of a fixed-length message.
 ///
 /// This function creates a circuit that computes the Keccak-256 digest of a message
@@ -42,6 +45,40 @@ pub fn keccak256(
 	message: &[Wire],
 	len_bytes: usize,
 ) -> [Wire; N_WORDS_PER_DIGEST] {
+	let digest =
+		keccak_sponge_fixed(builder, message, len_bytes, N_WORDS_PER_DIGEST * 8, KECCAK_256_SUFFIX);
+	digest.try_into().unwrap()
+}
+
+/// Computes fixed-length SHAKE256 output.
+///
+/// This is the fixed-shape XOF counterpart to [`keccak256`]. The message length and
+/// output length are known at circuit construction time, and inputs/outputs are packed
+/// into little-endian 64-bit wires.
+///
+/// The final output word may contain extra squeezed bytes when `out_bytes` is not a
+/// multiple of eight. Callers that use a non-word-aligned output should mask the final
+/// word before comparing only the requested bytes.
+///
+/// # Panics
+/// * If `message.len()` does not equal exactly `len_bytes.div_ceil(8)`.
+pub fn shake256(
+	builder: &CircuitBuilder,
+	message: &[Wire],
+	len_bytes: usize,
+	out_bytes: usize,
+) -> Vec<Wire> {
+	assert!(out_bytes > 0, "out_bytes must be positive");
+	keccak_sponge_fixed(builder, message, len_bytes, out_bytes, SHAKE_SUFFIX)
+}
+
+fn keccak_sponge_fixed(
+	builder: &CircuitBuilder,
+	message: &[Wire],
+	len_bytes: usize,
+	out_bytes: usize,
+	delimited_suffix: u8,
+) -> Vec<Wire> {
 	// Validate that message.len() equals exactly len_bytes.div_ceil(8)
 	assert_eq!(
 		message.len(),
@@ -58,13 +95,14 @@ pub fn keccak256(
 	// Create padded message
 	let mut padded_message = Vec::with_capacity(n_padded_words);
 
-	// Apply Keccak padding within the circuit
-	// The padding consists of 0x01 byte after the message and 0x80 in the final byte of the block
+	// Apply Keccak/SHAKE padding within the circuit.
+	// The delimited suffix byte goes immediately after the message and 0x80 is XORed into the
+	// final byte of the padding block.
 	if len_bytes.is_multiple_of(8) {
 		// Message ends on a word boundary - all words are complete
 		padded_message.extend_from_slice(message);
-		// The 0x01 byte goes at the start of the next word
-		padded_message.push(builder.add_constant(Word(0x01)));
+		// The suffix byte goes at the start of the next word
+		padded_message.push(builder.add_constant(Word(delimited_suffix as u64)));
 	} else {
 		// Message ends mid-word - need to handle boundary word
 		padded_message.extend_from_slice(&message[..message.len() - 1]);
@@ -78,9 +116,9 @@ pub fn keccak256(
 		let mask = (1u64 << (byte_in_word * 8)) - 1;
 		let masked_word = builder.band(message[last_idx], builder.add_constant(Word(mask)));
 
-		// Add 0x01 padding byte right after the valid bytes
-		let padding_bit = 1u64 << (byte_in_word * 8);
-		let boundary_word = builder.bxor(masked_word, builder.add_constant(Word(padding_bit)));
+		// Add the suffix byte right after the valid bytes
+		let padding_byte = (delimited_suffix as u64) << (byte_in_word * 8);
+		let boundary_word = builder.bxor(masked_word, builder.add_constant(Word(padding_byte)));
 		padded_message.push(boundary_word);
 	}
 
@@ -110,8 +148,17 @@ pub fn keccak256(
 		Permutation::keccak_f1600(builder, &mut state);
 	}
 
-	// Return the first 4 words (256 bits) of the state as the digest
-	[state[0], state[1], state[2], state[3]]
+	let n_output_words = out_bytes.div_ceil(8);
+	let mut output = Vec::with_capacity(n_output_words);
+	while output.len() < n_output_words {
+		let take = (n_output_words - output.len()).min(N_WORDS_PER_BLOCK);
+		output.extend_from_slice(&state[..take]);
+		if output.len() < n_output_words {
+			Permutation::keccak_f1600(builder, &mut state);
+		}
+	}
+
+	output
 }
 
 #[cfg(test)]
@@ -120,7 +167,10 @@ mod tests {
 	use binius_frontend::CircuitBuilder;
 	use rand::{RngCore, SeedableRng, rngs::StdRng};
 	use rstest::rstest;
-	use sha3::{Digest, Keccak256};
+	use sha3::{
+		Digest, Keccak256, Shake256,
+		digest::{ExtendableOutput, Update, XofReader},
+	};
 
 	use super::*;
 
@@ -141,9 +191,7 @@ mod tests {
 		rng.fill_bytes(&mut message);
 
 		// Compute expected digest using sha3 crate
-		let mut hasher = Keccak256::new();
-		hasher.update(&message);
-		let expected_digest: [u8; 32] = hasher.finalize().into();
+		let expected_digest: [u8; 32] = Keccak256::digest(&message).into();
 
 		// Build circuit
 		let builder = CircuitBuilder::new();
@@ -180,6 +228,64 @@ mod tests {
 		for (i, chunk) in expected_digest.chunks(8).enumerate() {
 			let word = u64::from_le_bytes(chunk.try_into().unwrap());
 			witness[expected_digest_wires[i]] = Word(word);
+		}
+
+		circuit.populate_wire_witness(&mut witness).unwrap();
+		verify_constraints(cs, &witness.into_value_vec())
+			.expect("Circuit constraints should be satisfied");
+	}
+
+	#[rstest]
+	#[case(0, 32)]
+	#[case(32, 32)]
+	#[case(135, 32)]
+	#[case(136, 32)]
+	#[case(832, 32)]
+	#[case(832, 48)]
+	#[case(1088, 64)]
+	fn test_shake256_fixed(#[case] message_len_bytes: usize, #[case] out_bytes: usize) {
+		let seed = ((message_len_bytes as u64) << 32) | out_bytes as u64;
+		let mut rng = StdRng::seed_from_u64(seed);
+		let mut message = vec![0u8; message_len_bytes];
+		rng.fill_bytes(&mut message);
+
+		let mut hasher = Shake256::default();
+		Update::update(&mut hasher, &message);
+		let mut reader = hasher.finalize_xof();
+		let mut expected_output = vec![0u8; out_bytes.div_ceil(8) * 8];
+		reader.read(&mut expected_output);
+
+		let builder = CircuitBuilder::new();
+		let n_words = message_len_bytes.div_ceil(8);
+		let message_wires: Vec<_> = (0..n_words).map(|_| builder.add_witness()).collect();
+		let expected_output_wires: Vec<_> = (0..out_bytes.div_ceil(8))
+			.map(|_| builder.add_witness())
+			.collect();
+
+		let computed_output = shake256(&builder, &message_wires, message_len_bytes, out_bytes);
+
+		for (i, (&computed, &expected)) in computed_output
+			.iter()
+			.zip(expected_output_wires.iter())
+			.enumerate()
+		{
+			builder.assert_eq(format!("shake_output[{i}]"), computed, expected);
+		}
+
+		let circuit = builder.build();
+		let cs = circuit.constraint_system();
+		let mut witness = circuit.new_witness_filler();
+
+		for (i, chunk) in message.chunks(8).enumerate() {
+			let mut word_bytes = [0u8; 8];
+			word_bytes[..chunk.len()].copy_from_slice(chunk);
+			let word = u64::from_le_bytes(word_bytes);
+			witness[message_wires[i]] = Word(word);
+		}
+
+		for (i, chunk) in expected_output.chunks(8).enumerate() {
+			let word = u64::from_le_bytes(chunk.try_into().unwrap());
+			witness[expected_output_wires[i]] = Word(word);
 		}
 
 		circuit.populate_wire_witness(&mut witness).unwrap();

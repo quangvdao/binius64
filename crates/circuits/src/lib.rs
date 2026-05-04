@@ -33,6 +33,7 @@ pub mod hash_based_sig;
 pub mod hmac;
 pub mod jwt_claims;
 pub mod keccak;
+pub mod mldsa;
 pub mod multiplexer;
 pub mod popcount;
 pub mod ripemd;
