@@ -88,11 +88,11 @@ impl<F: Field> PreparedOperatorData<F> {
 /// 3. **Phase 2**: Reduces to witness evaluation using monster multilinear polynomial
 ///
 /// # Parameters
-/// - `key_collection`: Prover's key collection representing the constraint system
+/// - `key_collection`: Prover's flat key collection representing the constraint system
 /// - `words`: The witness words (must have power-of-2 length)
 /// - `bitand_data`: Operator data for bit multiplication (AND) constraints
 /// - `intmul_data`: Operator data for integer multiplication (MUL) constraints
-/// - `transcript`: The prover's transcript for interactive protocol
+/// - `channel`: The prover's channel for interactive protocol messages
 ///
 /// # Returns
 /// Returns `SumcheckOutput` containing the final challenges and witness evaluation,
@@ -117,6 +117,9 @@ where
 }
 
 /// Proves the shift protocol reduction from an explicit key source.
+///
+/// This is the repeated-aware entry point used after the caller chooses either flat key
+/// materialization or a compact repeated key view.
 pub(crate) fn prove_with_key_source<F, P, Channel>(
 	key_source: &ShiftKeySource<'_>,
 	words: &[Word],
