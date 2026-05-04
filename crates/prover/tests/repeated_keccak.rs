@@ -1,5 +1,7 @@
 // Copyright 2026 The Binius Developers
 
+use std::time::{Duration, Instant};
+
 use binius_circuits::keccak::{N_WORDS_PER_DIGEST, fixed_length::keccak256};
 use binius_core::{
 	constraint_system::{ConstraintSystem, ValueVec},
@@ -18,7 +20,7 @@ use binius_verifier::{
 use sha3::{Digest, Keccak256};
 
 const LOG_INV_RATE: usize = 1;
-const LOG_INSTANCES: usize = 1;
+const SMOKE_LOG_INSTANCES: usize = 1;
 const MESSAGE_LEN_BYTES: usize = 8;
 
 struct FixedKeccakCircuit {
@@ -84,12 +86,14 @@ fn message_for_instance(instance: usize) -> [u8; MESSAGE_LEN_BYTES] {
 	message
 }
 
-fn repeated_keccak_fixture() -> (RepeatedConstraintSystem, ConstraintSystem, ValueVec) {
+fn repeated_keccak_fixture(
+	log_instances: usize,
+) -> (RepeatedConstraintSystem, ConstraintSystem, ValueVec) {
 	let keccak = FixedKeccakCircuit::new(MESSAGE_LEN_BYTES);
 	let base_constraint_system = keccak.constraint_system();
-	let repeated = RepeatedConstraintSystem::new(base_constraint_system, LOG_INSTANCES);
+	let repeated = RepeatedConstraintSystem::new(base_constraint_system, log_instances);
 	let flat_constraint_system = repeated.to_flat_constraint_system();
-	let instances = (0..1usize << LOG_INSTANCES)
+	let instances = (0..1usize << log_instances)
 		.map(|instance| keccak.value_vec(&message_for_instance(instance)))
 		.collect::<Vec<_>>();
 	let flat_value_vec = repeated
@@ -99,9 +103,24 @@ fn repeated_keccak_fixture() -> (RepeatedConstraintSystem, ConstraintSystem, Val
 	(repeated, flat_constraint_system, flat_value_vec)
 }
 
+fn elapsed_for<T>(f: impl FnOnce() -> T) -> (T, Duration) {
+	let start = Instant::now();
+	let value = f();
+	(value, start.elapsed())
+}
+
+fn average_elapsed(iterations: usize, mut f: impl FnMut()) -> Duration {
+	let start = Instant::now();
+	for _ in 0..iterations {
+		f();
+	}
+	start.elapsed() / iterations as u32
+}
+
 #[test]
 fn repeated_keccak_descriptor_flattens_builder_witnesses() {
-	let (repeated, flat_constraint_system, flat_value_vec) = repeated_keccak_fixture();
+	let (repeated, flat_constraint_system, flat_value_vec) =
+		repeated_keccak_fixture(SMOKE_LOG_INSTANCES);
 
 	assert_eq!(repeated.base().value_vec_layout.n_inout, 0);
 	assert!(repeated.matches_flat_constraint_system(&flat_constraint_system));
@@ -112,7 +131,8 @@ fn repeated_keccak_descriptor_flattens_builder_witnesses() {
 #[test]
 #[ignore = "runs an end-to-end repeated Keccak proof"]
 fn repeated_keccak_prove_verify() {
-	let (repeated, flat_constraint_system, flat_value_vec) = repeated_keccak_fixture();
+	let (repeated, flat_constraint_system, flat_value_vec) =
+		repeated_keccak_fixture(SMOKE_LOG_INSTANCES);
 	verify_constraints(&flat_constraint_system, &flat_value_vec)
 		.expect("flattened repeated Keccak witness satisfies the expanded circuit");
 
@@ -141,4 +161,86 @@ fn repeated_keccak_prove_verify() {
 	verifier_transcript
 		.finalize()
 		.expect("repeated Keccak transcript is exhausted");
+}
+
+#[test]
+#[ignore = "prints flat vs repeated verifier runtimes for repeated Keccak"]
+fn repeated_keccak_verifier_print_runtimes() {
+	println!(
+		"End-to-end Keccak verifier timing with hidden message/digest witness values and structured repeated Shift verification."
+	);
+	println!(
+		"log_instances,instances,base_and_constraints,flat_and_constraints,prove_repeated_ms,flat_verify_ms,repeated_verify_ms,speedup"
+	);
+
+	for log_instances in [0usize, 1, 2, 4] {
+		let (repeated, flat_constraint_system, flat_value_vec) =
+			repeated_keccak_fixture(log_instances);
+		verify_constraints(&flat_constraint_system, &flat_value_vec)
+			.expect("flattened repeated Keccak witness satisfies the expanded circuit");
+
+		let verifier = Verifier::<StdDigest, _>::setup_repeated(
+			&repeated,
+			LOG_INV_RATE,
+			StdCompression::default(),
+		)
+		.expect("repeated verifier setup succeeds");
+		let flat_prover = Prover::<OptimalPackedB128, _, StdDigest>::setup(
+			verifier.clone(),
+			ParallelCompressionAdaptor::new(StdCompression::default()),
+		)
+		.expect("flat Keccak prover setup succeeds");
+		let repeated_prover = Prover::<OptimalPackedB128, _, StdDigest>::setup_repeated(
+			verifier.clone(),
+			ParallelCompressionAdaptor::new(StdCompression::default()),
+			repeated.clone(),
+		)
+		.expect("repeated Keccak prover setup succeeds");
+
+		let flat_prover_transcript = {
+			let mut prover_transcript = ProverTranscript::new(StdChallenger::default());
+			flat_prover
+				.prove(flat_value_vec.clone(), &mut prover_transcript)
+				.expect("flat Keccak prover succeeds");
+			prover_transcript
+		};
+		let (repeated_prover_transcript, prove_repeated_elapsed) = elapsed_for(|| {
+			let mut prover_transcript = ProverTranscript::new(StdChallenger::default());
+			repeated_prover
+				.prove_repeated(&repeated, flat_value_vec.clone(), &mut prover_transcript)
+				.expect("repeated Keccak prover succeeds");
+			prover_transcript
+		});
+
+		let verify_iterations = 64;
+		let flat_verify_elapsed = average_elapsed(verify_iterations, || {
+			let mut verifier_transcript = flat_prover_transcript.clone().into_verifier();
+			verifier
+				.verify(flat_value_vec.public(), &mut verifier_transcript)
+				.expect("flat Keccak verifier accepts");
+			verifier_transcript
+				.finalize()
+				.expect("flat Keccak transcript is exhausted");
+		});
+		let repeated_verify_elapsed = average_elapsed(verify_iterations, || {
+			let mut verifier_transcript = repeated_prover_transcript.clone().into_verifier();
+			verifier
+				.verify_repeated(flat_value_vec.public(), &repeated, &mut verifier_transcript)
+				.expect("repeated Keccak verifier accepts");
+			verifier_transcript
+				.finalize()
+				.expect("repeated Keccak transcript is exhausted");
+		});
+
+		let prove_repeated_ms = prove_repeated_elapsed.as_secs_f64() * 1_000.0;
+		let flat_verify_ms = flat_verify_elapsed.as_secs_f64() * 1_000.0;
+		let repeated_verify_ms = repeated_verify_elapsed.as_secs_f64() * 1_000.0;
+		println!(
+			"{log_instances},{},{},{},{prove_repeated_ms:.3},{flat_verify_ms:.3},{repeated_verify_ms:.3},{:.2}x",
+			1usize << log_instances,
+			repeated.base().and_constraints.len(),
+			flat_constraint_system.and_constraints.len(),
+			flat_verify_ms / repeated_verify_ms,
+		);
+	}
 }
