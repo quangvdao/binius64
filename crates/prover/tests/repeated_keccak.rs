@@ -22,6 +22,7 @@ use sha3::{Digest, Keccak256};
 const LOG_INV_RATE: usize = 1;
 const SMOKE_LOG_INSTANCES: usize = 1;
 const MESSAGE_LEN_BYTES: usize = 8;
+const MEASURED_LOG_INSTANCES: [usize; 4] = [0, 1, 2, 4];
 
 struct FixedKeccakCircuit {
 	circuit: Circuit,
@@ -81,7 +82,8 @@ impl FixedKeccakCircuit {
 fn message_for_instance(instance: usize) -> [u8; MESSAGE_LEN_BYTES] {
 	let mut message = [0u8; MESSAGE_LEN_BYTES];
 	for (index, byte) in message.iter_mut().enumerate() {
-		*byte = (0x42 + 17 * instance as u8 + index as u8) ^ ((index as u8) << 3);
+		let seed = 0x42u16 + 17 * instance as u16 + index as u16;
+		*byte = seed as u8 ^ ((index as u8) << 3);
 	}
 	message
 }
@@ -173,7 +175,7 @@ fn repeated_keccak_verifier_print_runtimes() {
 		"log_instances,instances,base_and_constraints,flat_and_constraints,prove_repeated_ms,flat_verify_ms,repeated_verify_ms,speedup"
 	);
 
-	for log_instances in [0usize, 1, 2, 4] {
+	for log_instances in MEASURED_LOG_INSTANCES {
 		let (repeated, flat_constraint_system, flat_value_vec) =
 			repeated_keccak_fixture(log_instances);
 		verify_constraints(&flat_constraint_system, &flat_value_vec)
@@ -255,7 +257,7 @@ fn repeated_keccak_prover_key_materialization_print_runtimes() {
 		"log_instances,instances,flat_key_words,repeated_key_words,flat_keys,repeated_keys,flat_setup_ms,repeated_setup_ms,flat_repeated_prove_ms,compact_repeated_prove_ms"
 	);
 
-	for log_instances in [0usize, 1, 2, 4] {
+	for log_instances in MEASURED_LOG_INSTANCES {
 		let (repeated, flat_constraint_system, flat_value_vec) =
 			repeated_keccak_fixture(log_instances);
 		verify_constraints(&flat_constraint_system, &flat_value_vec)
