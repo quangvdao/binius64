@@ -5,12 +5,12 @@ use binius_frontend::{CircuitBuilder, Wire};
 use crate::keccak::fixed_length;
 
 use super::{
-	mldsa44,
-	types::{Mldsa44SampleInBallOneBlock, Mldsa44SampleInBallOneBlockSparse},
+	MldsaParams,
+	types::{MldsaSampleInBallOneBlock, MldsaSampleInBallOneBlockSparse},
 	util::{assert_true_cond, iadd_wrapping, isub_one, select_indexed_wire_unchecked},
 };
 
-/// Computes the fixed one-block ML-DSA-44 `SampleInBall` SHAKE stream.
+/// Computes the fixed one-block ML-DSA `SampleInBall` SHAKE stream.
 ///
 /// This is the first fixed-cap sampler shape from the top-level plan:
 ///
@@ -22,26 +22,26 @@ use super::{
 ///
 /// The Fisher-Yates rejection/update relation is layered on top of this stream. The cap is part of
 /// the circuit identity, so repeated batches must not mix this helper with two-block sampler shapes.
-pub fn mldsa44_sample_in_ball_one_block_stream(
+pub fn sample_in_ball_one_block_stream_for<P: MldsaParams>(
 	builder: &CircuitBuilder,
 	c_tilde: &[Wire],
-) -> [Wire; mldsa44::SAMPLE_IN_BALL_ONE_BLOCK_STREAM_BYTES / 8] {
+) -> Vec<Wire> {
 	assert_eq!(
 		c_tilde.len(),
-		mldsa44::C_TILDE_BYTES / 8,
-		"ML-DSA-44 c_tilde expects 32 bytes packed into 4 words",
+		P::C_TILDE_BYTES / 8,
+		"{} c_tilde packed word count mismatch",
+		P::label(),
 	);
 
-	let stream = fixed_length::shake256(
+	fixed_length::shake256(
 		builder,
 		c_tilde,
-		mldsa44::C_TILDE_BYTES,
-		mldsa44::SAMPLE_IN_BALL_ONE_BLOCK_STREAM_BYTES,
-	);
-	stream.try_into().unwrap()
+		P::C_TILDE_BYTES,
+		P::SAMPLE_IN_BALL_ONE_BLOCK_STREAM_BYTES,
+	)
 }
 
-/// Proves the fixed one-block ML-DSA-44 `SampleInBall` rejection/update relation from a SHAKE
+/// Proves the fixed one-block ML-DSA `SampleInBall` rejection/update relation from a SHAKE
 /// stream.
 ///
 /// The SHAKE stream must be the 136-byte output of `SHAKE256(c_tilde, 136)`. The helper allocates
@@ -51,37 +51,38 @@ pub fn mldsa44_sample_in_ball_one_block_stream(
 /// - skipped draws are `> i`;
 /// - the final accepted draw is `<= i`;
 /// - challenge coefficients follow the FIPS swap/update rule.
-pub fn mldsa44_sample_in_ball_one_block_from_stream(
+pub fn sample_in_ball_one_block_from_stream_for<P: MldsaParams>(
 	builder: &CircuitBuilder,
 	stream: &[Wire],
-) -> Mldsa44SampleInBallOneBlock {
-	let sparse = mldsa44_sample_in_ball_one_block_sparse_from_stream(builder, stream);
-	let coeffs = mldsa44_expand_sparse_sample_in_ball(builder, &sparse.positions, &sparse.signs);
-	Mldsa44SampleInBallOneBlock {
+) -> MldsaSampleInBallOneBlock {
+	let sparse = sample_in_ball_one_block_sparse_from_stream_for::<P>(builder, stream);
+	let coeffs = expand_sparse_sample_in_ball_for::<P>(builder, &sparse.positions, &sparse.signs);
+	MldsaSampleInBallOneBlock {
 		coeffs,
 		draw_counts: sparse.draw_counts,
 	}
 }
 
-/// Proves the fixed one-block ML-DSA-44 `SampleInBall` rejection/update relation from a SHAKE
+/// Proves the fixed one-block ML-DSA `SampleInBall` rejection/update relation from a SHAKE
 /// stream and keeps the challenge in its natural sparse representation.
-pub fn mldsa44_sample_in_ball_one_block_sparse_from_stream(
+pub fn sample_in_ball_one_block_sparse_from_stream_for<P: MldsaParams>(
 	builder: &CircuitBuilder,
 	stream: &[Wire],
-) -> Mldsa44SampleInBallOneBlockSparse {
+) -> MldsaSampleInBallOneBlockSparse {
 	assert_eq!(
 		stream.len(),
-		mldsa44::SAMPLE_IN_BALL_ONE_BLOCK_STREAM_BYTES / 8,
-		"ML-DSA-44 one-block SampleInBall expects 136 stream bytes packed into 17 words",
+		P::SAMPLE_IN_BALL_ONE_BLOCK_STREAM_BYTES / 8,
+		"{} one-block SampleInBall packed stream length mismatch",
+		P::label(),
 	);
 
 	let zero = builder.add_constant_64(0);
 	let one = builder.add_constant_64(1);
-	let mut sparse_positions = Vec::with_capacity(mldsa44::TAU);
-	let mut sparse_signs = Vec::with_capacity(mldsa44::TAU);
-	let draw_counts: [Wire; mldsa44::TAU] = std::array::from_fn(|_| builder.add_witness());
+	let mut sparse_positions = Vec::with_capacity(P::TAU);
+	let mut sparse_signs = Vec::with_capacity(P::TAU);
+	let draw_counts: Vec<Wire> = (0..P::TAU).map(|_| builder.add_witness()).collect();
 
-	let mut draw_bytes = Vec::with_capacity(mldsa44::SAMPLE_IN_BALL_ONE_BLOCK_DRAW_CAP_BYTES);
+	let mut draw_bytes = Vec::with_capacity(P::SAMPLE_IN_BALL_ONE_BLOCK_DRAW_CAP_BYTES);
 	for &word in &stream[1..] {
 		for byte_idx in 0..8 {
 			draw_bytes.push(builder.extract_byte(word, byte_idx));
@@ -90,30 +91,29 @@ pub fn mldsa44_sample_in_ball_one_block_sparse_from_stream(
 
 	let mut cursor = zero;
 	for (round, &draw_count) in draw_counts.iter().enumerate() {
-		let i = mldsa44::N - mldsa44::TAU + round;
+		let i = P::N - P::TAU + round;
 		let i_wire = builder.add_constant_64(i as u64);
 
 		builder.assert_true(
-			format!("sample_in_ball_draw_count_nonzero[{round}]"),
+			format!("{}_sample_in_ball_draw_count_nonzero[{round}]", P::label()),
 			builder.icmp_ule(one, draw_count),
 		);
 
 		let next_cursor = iadd_wrapping(builder, cursor, draw_count);
-		let draw_cap =
-			builder.add_constant_64(mldsa44::SAMPLE_IN_BALL_ONE_BLOCK_DRAW_CAP_BYTES as u64);
+		let draw_cap = builder.add_constant_64(P::SAMPLE_IN_BALL_ONE_BLOCK_DRAW_CAP_BYTES as u64);
 		builder.assert_true(
-			format!("sample_in_ball_cursor_monotone[{round}]"),
+			format!("{}_sample_in_ball_cursor_monotone[{round}]", P::label()),
 			builder.icmp_ule(cursor, next_cursor),
 		);
 		builder.assert_true(
-			format!("sample_in_ball_cursor_within_cap[{round}]"),
+			format!("{}_sample_in_ball_cursor_within_cap[{round}]", P::label()),
 			builder.icmp_ule(next_cursor, draw_cap),
 		);
 
 		let accepted_pos = isub_one(builder, next_cursor);
 		let accepted_draw = select_indexed_wire_unchecked(builder, &draw_bytes, accepted_pos);
 		builder.assert_true(
-			format!("sample_in_ball_accepted_draw_le_i[{round}]"),
+			format!("{}_sample_in_ball_accepted_draw_le_i[{round}]", P::label()),
 			builder.icmp_ule(accepted_draw, i_wire),
 		);
 
@@ -125,7 +125,7 @@ pub fn mldsa44_sample_in_ball_one_block_sparse_from_stream(
 
 			assert_true_cond(
 				builder,
-				format!("sample_in_ball_skipped_draw_gt_i[{round}][{draw_idx}]"),
+				format!("{}_sample_in_ball_skipped_draw_gt_i[{round}][{draw_idx}]", P::label()),
 				builder.icmp_ugt(draw, i_wire),
 				is_skipped_pos,
 			);
@@ -146,20 +146,22 @@ pub fn mldsa44_sample_in_ball_one_block_sparse_from_stream(
 		cursor = next_cursor;
 	}
 
-	Mldsa44SampleInBallOneBlockSparse {
-		positions: sparse_positions.try_into().unwrap(),
-		signs: sparse_signs.try_into().unwrap(),
+	MldsaSampleInBallOneBlockSparse {
+		positions: sparse_positions,
+		signs: sparse_signs,
 		draw_counts,
 	}
 }
 
-pub(crate) fn mldsa44_expand_sparse_sample_in_ball(
+pub(crate) fn expand_sparse_sample_in_ball_for<P: MldsaParams>(
 	builder: &CircuitBuilder,
-	positions: &[Wire; mldsa44::TAU],
-	signs: &[Wire; mldsa44::TAU],
-) -> [Wire; mldsa44::N] {
+	positions: &[Wire],
+	signs: &[Wire],
+) -> Vec<Wire> {
+	assert_eq!(positions.len(), P::TAU, "{} sparse position count mismatch", P::label());
+	assert_eq!(signs.len(), P::TAU, "{} sparse sign count mismatch", P::label());
 	let zero = builder.add_constant_64(0);
-	let mut state = vec![zero; mldsa44::N];
+	let mut state = vec![zero; P::N];
 	for (coeff_idx, coeff) in state.iter_mut().enumerate() {
 		let coeff_idx_wire = builder.add_constant_64(coeff_idx as u64);
 		for (&position, &sign) in positions.iter().zip(signs.iter()) {
@@ -168,24 +170,24 @@ pub(crate) fn mldsa44_expand_sparse_sample_in_ball(
 		}
 	}
 
-	state.try_into().unwrap()
+	state
 }
 
-/// Computes and proves the fixed one-block ML-DSA-44 `SampleInBall` relation.
-pub fn mldsa44_sample_in_ball_one_block(
+/// Computes and proves the fixed one-block ML-DSA `SampleInBall` relation.
+pub fn sample_in_ball_one_block_for<P: MldsaParams>(
 	builder: &CircuitBuilder,
 	c_tilde: &[Wire],
-) -> Mldsa44SampleInBallOneBlock {
-	let stream = mldsa44_sample_in_ball_one_block_stream(builder, c_tilde);
-	mldsa44_sample_in_ball_one_block_from_stream(builder, &stream)
+) -> MldsaSampleInBallOneBlock {
+	let stream = sample_in_ball_one_block_stream_for::<P>(builder, c_tilde);
+	sample_in_ball_one_block_from_stream_for::<P>(builder, &stream)
 }
 
-/// Computes and proves the fixed one-block ML-DSA-44 `SampleInBall` relation, returning sparse
+/// Computes and proves the fixed one-block ML-DSA `SampleInBall` relation, returning sparse
 /// challenge entries for the lattice bridge.
-pub fn mldsa44_sample_in_ball_one_block_sparse(
+pub fn sample_in_ball_one_block_sparse_for<P: MldsaParams>(
 	builder: &CircuitBuilder,
 	c_tilde: &[Wire],
-) -> Mldsa44SampleInBallOneBlockSparse {
-	let stream = mldsa44_sample_in_ball_one_block_stream(builder, c_tilde);
-	mldsa44_sample_in_ball_one_block_sparse_from_stream(builder, &stream)
+) -> MldsaSampleInBallOneBlockSparse {
+	let stream = sample_in_ball_one_block_stream_for::<P>(builder, c_tilde);
+	sample_in_ball_one_block_sparse_from_stream_for::<P>(builder, &stream)
 }

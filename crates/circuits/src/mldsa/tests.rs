@@ -133,7 +133,7 @@ fn verify_mldsa44_z_packed_bytes_norm_witness(packed_y_coeff_values: &[u64]) -> 
 	let z_words: Vec<_> = (0..z_word_values.len())
 		.map(|_| builder.add_witness())
 		.collect();
-	assert_mldsa44_z_packed_bytes_norm(&builder, &z_words);
+	assert_z_packed_bytes_norm_for::<Mldsa44>(&builder, &z_words);
 
 	let circuit = builder.build();
 	let cs = circuit.constraint_system();
@@ -211,7 +211,7 @@ fn verify_mldsa44_sample_in_ball_stream_witness(
 		.map(|_| builder.add_witness())
 		.collect();
 
-	let sample = mldsa44_sample_in_ball_one_block_from_stream(&builder, &stream_words);
+	let sample = sample_in_ball_one_block_from_stream_for::<Mldsa44>(&builder, &stream_words);
 	for (i, (&computed, &expected)) in sample
 		.coeffs
 		.iter()
@@ -262,7 +262,8 @@ fn verify_mldsa44_one_block_hidden_hash_relation_witness(
 		.map(|_| builder.add_witness())
 		.collect();
 
-	let sample = mldsa44_one_block_hidden_hash_relation(&builder, &c_tilde_words, &mu_and_w1_words);
+	let sample =
+		one_block_hidden_hash_relation_for::<Mldsa44>(&builder, &c_tilde_words, &mu_and_w1_words);
 	for (i, (&computed, &expected)) in sample
 		.coeffs
 		.iter()
@@ -305,7 +306,7 @@ fn verify_mldsa44_w1_encode_witness(w1_coeff_values: &[u64]) -> bool {
 		.map(|_| builder.add_witness())
 		.collect();
 
-	let encoded = mldsa44_encode_w1(&builder, &w1_coeffs);
+	let encoded = encode_w1_for::<Mldsa44>(&builder, &w1_coeffs);
 	for (i, (&computed, &expected)) in encoded.iter().zip(expected_words.iter()).enumerate() {
 		builder.assert_eq(format!("mldsa44_w1_encode[{i}]"), computed, expected);
 	}
@@ -351,8 +352,12 @@ fn verify_mldsa44_w1encode_hash_relation_witness(
 		.map(|_| builder.add_witness())
 		.collect();
 
-	let sample =
-		mldsa44_one_block_w1encode_hash_relation(&builder, &c_tilde_words, &mu_words, &w1_coeffs);
+	let sample = one_block_w1encode_hash_relation_for::<Mldsa44>(
+		&builder,
+		&c_tilde_words,
+		&mu_words,
+		&w1_coeffs,
+	);
 	for (i, (&computed, &expected)) in sample
 		.coeffs
 		.iter()
@@ -400,9 +405,9 @@ fn verify_mldsa44_use_hint_witness(
 		.map(|_| builder.add_witness())
 		.collect();
 
-	let w1 = mldsa44_use_hint(&builder, &h_wires, &r_wires);
+	let w1 = use_hint_for::<Mldsa44>(&builder, &h_wires, &r_wires);
 	for (i, (&computed, &expected)) in w1.iter().zip(expected_wires.iter()).enumerate() {
-		builder.assert_eq(format!("mldsa44_use_hint[{i}]"), computed, expected);
+		builder.assert_eq(format!("use_hint_for::<Mldsa44>[{i}]"), computed, expected);
 	}
 
 	let circuit = builder.build();
@@ -449,7 +454,7 @@ fn verify_mldsa44_use_hint_hash_relation_witness(
 		.map(|_| builder.add_witness())
 		.collect();
 
-	let sample = mldsa44_one_block_use_hint_hash_relation(
+	let sample = one_block_use_hint_hash_relation_for::<Mldsa44>(
 		&builder,
 		&c_tilde_words,
 		&mu_words,
@@ -507,7 +512,7 @@ fn verify_mldsa44_hint_decode_witness(
 		.map(|_| builder.add_witness())
 		.collect();
 
-	let decoded = mldsa44_decode_hint_canonical(&builder, &h_words);
+	let decoded = decode_hint_canonical_for::<Mldsa44>(&builder, &h_words);
 	for (i, (&computed, &expected)) in decoded.iter().zip(expected_wires.iter()).enumerate() {
 		builder.assert_eq(format!("mldsa44_hint_decode[{i}]"), computed, expected);
 	}
@@ -540,7 +545,7 @@ fn verify_mldsa44_hint_matches_expanded_witness(
 		.collect();
 	let h_coeffs: Vec<_> = (0..h_values.len()).map(|_| builder.add_witness()).collect();
 
-	assert_mldsa44_hint_canonical_matches_expanded(&builder, &h_words, &h_coeffs);
+	assert_hint_canonical_matches_expanded_for::<Mldsa44>(&builder, &h_words, &h_coeffs);
 
 	let circuit = builder.build();
 	let cs = circuit.constraint_system();
@@ -577,7 +582,7 @@ fn build_mldsa44_full_bit_heavy_one_block_circuit() -> binius_frontend::Circuit 
 		.map(|_| builder.add_witness())
 		.collect();
 
-	mldsa44_full_bit_heavy_one_block_relation(
+	full_bit_heavy_one_block_relation_for::<Mldsa44>(
 		&builder,
 		&c_tilde,
 		&z_words,
@@ -607,7 +612,7 @@ fn build_mldsa44_full_bit_heavy_one_block_canonical_hint_circuit() -> binius_fro
 		.map(|_| builder.add_witness())
 		.collect();
 
-	mldsa44_full_bit_heavy_one_block_canonical_hint_relation(
+	full_bit_heavy_one_block_canonical_hint_relation_for::<Mldsa44>(
 		&builder,
 		&c_tilde,
 		&z_words,
@@ -619,29 +624,25 @@ fn build_mldsa44_full_bit_heavy_one_block_canonical_hint_circuit() -> binius_fro
 	builder.build()
 }
 
-fn build_mldsa44_full_bit_heavy_one_block_canonical_hint_matched_circuit()
+fn build_full_bit_heavy_one_block_canonical_hint_matched_circuit_for<P: MldsaParams>()
 -> binius_frontend::Circuit {
 	let builder = CircuitBuilder::new();
-	let c_tilde: Vec<_> = (0..mldsa44::C_TILDE_BYTES / 8)
+	let c_tilde: Vec<_> = (0..P::C_TILDE_BYTES / 8)
 		.map(|_| builder.add_witness())
 		.collect();
-	let z_words: Vec<_> = (0..mldsa44::Z_PACKED_WORDS)
+	let z_words: Vec<_> = (0..P::Z_PACKED_WORDS)
 		.map(|_| builder.add_witness())
 		.collect();
-	let h_words: Vec<_> = (0..mldsa44::HINT_WORDS)
+	let h_words: Vec<_> = (0..P::HINT_WORDS).map(|_| builder.add_witness()).collect();
+	let h_coeffs: Vec<_> = (0..P::W1_COEFFICIENTS)
 		.map(|_| builder.add_witness())
 		.collect();
-	let h_coeffs: Vec<_> = (0..mldsa44::W1_COEFFICIENTS)
-		.map(|_| builder.add_witness())
-		.collect();
-	let mu_words: Vec<_> = (0..mldsa44::MU_WORDS)
-		.map(|_| builder.add_inout())
-		.collect();
-	let w_approx_coeffs: Vec<_> = (0..mldsa44::W1_COEFFICIENTS)
+	let mu_words: Vec<_> = (0..P::MU_WORDS).map(|_| builder.add_inout()).collect();
+	let w_approx_coeffs: Vec<_> = (0..P::W1_COEFFICIENTS)
 		.map(|_| builder.add_witness())
 		.collect();
 
-	mldsa44_full_bit_heavy_one_block_canonical_hint_matched_relation(
+	full_bit_heavy_one_block_canonical_hint_matched_relation_for::<P>(
 		&builder,
 		&c_tilde,
 		&z_words,
@@ -654,6 +655,11 @@ fn build_mldsa44_full_bit_heavy_one_block_canonical_hint_matched_circuit()
 	builder.build()
 }
 
+fn build_mldsa44_full_bit_heavy_one_block_canonical_hint_matched_circuit()
+-> binius_frontend::Circuit {
+	build_full_bit_heavy_one_block_canonical_hint_matched_circuit_for::<Mldsa44>()
+}
+
 fn verify_mldsa44_z_decode_witness(packed_y_coeff_values: &[u64]) {
 	let z_word_values = pack_mldsa44_z_y_coeffs(packed_y_coeff_values);
 	let builder = CircuitBuilder::new();
@@ -664,7 +670,7 @@ fn verify_mldsa44_z_decode_witness(packed_y_coeff_values: &[u64]) {
 		.map(|_| builder.add_witness())
 		.collect();
 
-	let decoded = mldsa44_decode_z_packed_y(&builder, &z_words);
+	let decoded = decode_z_packed_y_for::<Mldsa44>(&builder, &z_words);
 	for (i, (&decoded, &expected)) in decoded.iter().zip(expected_coeffs.iter()).enumerate() {
 		builder.assert_eq(format!("mldsa44_z_decode[{i}]"), decoded, expected);
 	}
@@ -689,7 +695,7 @@ fn verify_mldsa44_z_norm_witness(packed_y_coeff_values: &[u64]) -> bool {
 	let packed_y_coeffs: Vec<_> = (0..packed_y_coeff_values.len())
 		.map(|_| builder.add_witness())
 		.collect();
-	assert_mldsa44_z_norm_from_packed_y(&builder, &packed_y_coeffs);
+	assert_z_norm_from_packed_y_for::<Mldsa44>(&builder, &packed_y_coeffs);
 
 	let circuit = builder.build();
 	let cs = circuit.constraint_system();
@@ -722,7 +728,7 @@ fn mldsa44_final_challenge_hash_matches_shake256() {
 	let expected_wires: [Wire; mldsa44::C_TILDE_BYTES / 8] =
 		std::array::from_fn(|_| builder.add_witness());
 
-	let computed = mldsa44_final_challenge_hash(&builder, &input_wires);
+	let computed = final_challenge_hash_for::<Mldsa44>(&builder, &input_wires);
 	for i in 0..computed.len() {
 		builder.assert_eq(format!("c_tilde_prime[{i}]"), computed[i], expected_wires[i]);
 	}
@@ -763,7 +769,7 @@ fn mldsa44_sample_in_ball_one_block_stream_matches_shake256() {
 	let expected_wires: [Wire; mldsa44::SAMPLE_IN_BALL_ONE_BLOCK_STREAM_BYTES / 8] =
 		std::array::from_fn(|_| builder.add_witness());
 
-	let computed = mldsa44_sample_in_ball_one_block_stream(&builder, &c_tilde_wires);
+	let computed = sample_in_ball_one_block_stream_for::<Mldsa44>(&builder, &c_tilde_wires);
 	for i in 0..computed.len() {
 		builder.assert_eq(format!("sample_in_ball_stream[{i}]"), computed[i], expected_wires[i]);
 	}
@@ -887,7 +893,7 @@ fn mldsa44_w1_encode_rejects_out_of_range_coeff() {
 
 	let builder = CircuitBuilder::new();
 	let w1_coeffs: Vec<_> = (0..w1.len()).map(|_| builder.add_witness()).collect();
-	mldsa44_encode_w1(&builder, &w1_coeffs);
+	encode_w1_for::<Mldsa44>(&builder, &w1_coeffs);
 
 	let circuit = builder.build();
 	let cs = circuit.constraint_system();
@@ -1150,6 +1156,28 @@ fn mldsa44_full_bit_heavy_one_block_canonical_hint_matched_circuit_builds_and_pr
 }
 
 #[test]
+fn mldsa65_full_bit_heavy_one_block_canonical_hint_matched_circuit_builds() {
+	let circuit = build_full_bit_heavy_one_block_canonical_hint_matched_circuit_for::<Mldsa65>();
+	let stat = CircuitStat::collect(&circuit);
+
+	assert_eq!(stat.n_inout, mldsa65::MU_WORDS);
+	assert!(stat.n_gates > 0);
+	assert!(stat.n_and_constraints > 0);
+	assert_eq!(stat.n_mul_constraints, 0);
+}
+
+#[test]
+fn mldsa87_full_bit_heavy_one_block_canonical_hint_matched_circuit_builds() {
+	let circuit = build_full_bit_heavy_one_block_canonical_hint_matched_circuit_for::<Mldsa87>();
+	let stat = CircuitStat::collect(&circuit);
+
+	assert_eq!(stat.n_inout, mldsa87::MU_WORDS);
+	assert!(stat.n_gates > 0);
+	assert!(stat.n_and_constraints > 0);
+	assert_eq!(stat.n_mul_constraints, 0);
+}
+
+#[test]
 fn mldsa44_z_norm_accepts_boundary_values() {
 	let mut packed_y = vec![mldsa44::Z_NORM_PACKED_Y_MIN; mldsa44::Z_COEFFICIENTS];
 	packed_y[17] = mldsa44::Z_NORM_PACKED_Y_MAX;
@@ -1218,7 +1246,7 @@ fn mldsa44_z_norm_rejects_above_max() {
 //
 // The block below intentionally targets:
 //
-// 1. The Barrett-style `mldsa44_high_bits` formula (`((r + 127) >> 7) * 11275 + (1 << 23)) >>
+// 1. The Barrett-style `high_bits_for::<Mldsa44>` formula (`((r + 127) >> 7) * 11275 + (1 << 23)) >>
 //    24`) plus the `t > 43 ? 0 : t` clamp that emulates FIPS Decompose's special case for
 //    `r' - r0' = q - 1`. We sweep all interesting boundary `r` and a wide pseudo-random sample
 //    against the host reference.
@@ -1227,7 +1255,7 @@ fn mldsa44_z_norm_rejects_above_max() {
 // 3. The `||z||_infty < gamma1 - beta` range across the canonical 18-bit encoding extremes (0,
 //    2^18 - 1) and across coefficient slots that exercise both the single-word and two-word
 //    decode branches.
-// 4. The FIPS `omega` weight bound on `h`, now enforced inside `mldsa44_use_hint`.
+// 4. The FIPS `omega` weight bound on `h`, now enforced inside `use_hint_for::<Mldsa44>`.
 // 5. Rejection of structurally invalid hint encodings (endpoint > omega, non-monotone
 //    endpoints, position >= N).
 //
@@ -1242,7 +1270,7 @@ fn build_mldsa44_high_bits_circuit(
 	let r_wires: Vec<_> = (0..r_count).map(|_| builder.add_witness()).collect();
 	let expected_wires: Vec<_> = (0..r_count).map(|_| builder.add_witness()).collect();
 	for (i, (&r, &expected)) in r_wires.iter().zip(expected_wires.iter()).enumerate() {
-		let computed = mldsa44_high_bits(&builder, r);
+		let computed = high_bits_for::<Mldsa44>(&builder, r);
 		builder.assert_eq(format!("hb_eq[{i}]"), computed, expected);
 	}
 	(builder.build(), r_wires, expected_wires)
@@ -1528,7 +1556,7 @@ fn mldsa44_w1_encode_rejects_out_of_range_at_slot(#[case] slot: usize) {
 
 	let builder = CircuitBuilder::new();
 	let w1_coeffs: Vec<_> = (0..w1.len()).map(|_| builder.add_witness()).collect();
-	mldsa44_encode_w1(&builder, &w1_coeffs);
+	encode_w1_for::<Mldsa44>(&builder, &w1_coeffs);
 
 	let circuit = builder.build();
 	let cs = circuit.constraint_system();
@@ -1665,8 +1693,8 @@ fn mldsa44_hint_decode_accepts_only_trailing_segment() {
 }
 
 /// Differential coverage between the two `z`-norm gadgets:
-/// `assert_mldsa44_z_norm_from_packed_y` consumes already-decoded packed-`y` coefficients,
-/// while `assert_mldsa44_z_packed_bytes_norm` decodes from the BitPack byte stream first.
+/// `assert_z_norm_from_packed_y_for::<Mldsa44>` consumes already-decoded packed-`y` coefficients,
+/// while `assert_z_packed_bytes_norm_for::<Mldsa44>` decodes from the BitPack byte stream first.
 /// Their accept sets must agree for every coefficient slot we exercise here.
 ///
 /// Each case picks one slot, pins every other slot to a value safely inside the norm window

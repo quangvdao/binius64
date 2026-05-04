@@ -39,7 +39,7 @@ pub(crate) fn isub_one(builder: &CircuitBuilder, x: Wire) -> Wire {
 ///
 /// **Correctness contract**: the caller must guarantee the product fits in 64 bits, i.e.
 /// `x * c < 2^64`. Each `iadd` discards its high carry, so an overflowing multiplication is
-/// silently truncated and would corrupt downstream constraints. Used by `mldsa44_high_bits` where
+/// silently truncated and would corrupt downstream constraints. Used by `high_bits_for` where
 /// `x <= q-1 < 2^23` and `c = 11275 < 2^14`, leaving 27 bits of slack. Trades one `MUL` opcode for
 /// `popcount(c)` shifts and `popcount(c) - 1` adds, which is cheaper for low-Hamming-weight
 /// constants under the AND-reduction proof system.
