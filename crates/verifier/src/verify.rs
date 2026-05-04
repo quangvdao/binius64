@@ -263,6 +263,177 @@ impl IOPVerifier {
 
 		Ok(())
 	}
+
+	/// Verifies a flat proof of repeated identical copies using a structured Shift monster check.
+	///
+	/// This verifier still uses the flat witness oracle, flat public input section, and flat
+	/// PCS/public-input checks from `self`. The repeated structure is used only for verifier-side
+	/// constraint-system evaluation in the Shift check.
+	pub fn verify_repeated<Channel>(
+		&self,
+		public: &[Word],
+		base_constraint_system: &ConstraintSystem,
+		log_instances: usize,
+		channel: &mut Channel,
+	) -> Result<(), Error>
+	where
+		Channel: IOPVerifierChannel<B128>,
+		Channel::Elem: FieldOps<Scalar = B128> + From<B128>,
+	{
+		if public.len() != 1 << self.log_public_words() {
+			return Err(Error::IncorrectPublicInputLength {
+				expected: 1 << self.log_public_words(),
+				actual: public.len(),
+			});
+		}
+
+		let public_elems = channel.observe_many(&encode_public(public));
+
+		let _verify_guard = tracing::info_span!(
+			"VerifyRepeated",
+			operation = "verify_repeated",
+			perfetto_category = "operation"
+		)
+		.entered();
+
+		let subfield_subspace = BinarySubspace::<B8>::default().isomorphic();
+		let extended_subspace = subfield_subspace.reduce_dim(LOG_WORD_SIZE_BITS + 1);
+		let domain_subspace = extended_subspace.reduce_dim(LOG_WORD_SIZE_BITS);
+
+		let trace_oracle = channel.recv_oracle()?;
+
+		let intmul_guard = tracing::info_span!(
+			"[phase] Verify IntMul Reduction",
+			phase = "verify_intmul_reduction",
+			perfetto_category = "phase",
+			base_constraints = base_constraint_system.n_mul_constraints(),
+			log_instances
+		)
+		.entered();
+		let log_n_constraints =
+			checked_log_2(base_constraint_system.n_mul_constraints()) + log_instances;
+		let intmul_output =
+			verify_intmul_reduction::<B128, _>(LOG_WORD_SIZE_BITS, log_n_constraints, channel)?;
+		drop(intmul_guard);
+
+		let bitand_guard = tracing::info_span!(
+			"[phase] Verify BitAnd Reduction",
+			phase = "verify_bitand_reduction",
+			perfetto_category = "phase",
+			base_constraints = base_constraint_system.n_and_constraints(),
+			log_instances
+		)
+		.entered();
+		let bitand_claim = {
+			let log_n_constraints =
+				checked_log_2(base_constraint_system.n_and_constraints()) + log_instances;
+			let AndCheckOutput {
+				a_eval,
+				b_eval,
+				c_eval,
+				z_challenge,
+				eval_point,
+			} = verify_bitand_reduction(log_n_constraints, &extended_subspace, channel)?;
+			OperatorData::new(z_challenge, eval_point, [a_eval, b_eval, c_eval])
+		};
+		drop(bitand_guard);
+
+		let intmul_claim = {
+			let IntMulOutput {
+				a_evals,
+				b_evals,
+				c_lo_evals,
+				c_hi_evals,
+				eval_point,
+			} = intmul_output;
+
+			let r_zhat_prime = bitand_claim.r_zhat_prime.clone();
+			let l_tilde = lagrange_evals_scalars(&domain_subspace, r_zhat_prime.clone());
+			let make_final_claim = |evals| inner_product_scalars(evals, l_tilde.iter().cloned());
+			OperatorData::new(
+				r_zhat_prime,
+				eval_point,
+				[
+					make_final_claim(a_evals),
+					make_final_claim(b_evals),
+					make_final_claim(c_lo_evals),
+					make_final_claim(c_hi_evals),
+				],
+			)
+		};
+
+		let constraint_guard = tracing::info_span!(
+			"[phase] Verify Shift Reduction",
+			phase = "verify_shift_reduction",
+			perfetto_category = "phase"
+		)
+		.entered();
+		let shift_output = shift::verify_repeated(
+			base_constraint_system,
+			log_instances,
+			&bitand_claim,
+			&intmul_claim,
+			channel,
+		)?;
+		drop(constraint_guard);
+
+		let public_guard = tracing::info_span!(
+			"[phase] Verify Public Input",
+			phase = "verify_public_input",
+			perfetto_category = "phase"
+		)
+		.entered();
+		shift::check_eval_repeated(
+			base_constraint_system,
+			log_instances,
+			&bitand_claim,
+			&intmul_claim,
+			&domain_subspace,
+			&shift_output,
+			channel,
+		)?;
+		drop(public_guard);
+
+		let pcs_guard = tracing::info_span!(
+			"[phase] Verify PCS Opening",
+			phase = "verify_pcs_opening",
+			perfetto_category = "phase"
+		)
+		.entered();
+
+		let eval_point = [shift_output.r_j(), shift_output.r_y()].concat();
+		let ring_switch::RingSwitchVerifyOutput {
+			eq_r_double_prime,
+			sumcheck_claim,
+		} = ring_switch::verify(shift_output.witness_eval().clone(), &eval_point, channel)?;
+
+		let log_packing = <B128 as ExtensionField<B1>>::LOG_DEGREE;
+		let eval_point_high = eval_point[log_packing..].to_vec();
+
+		let log_public_elems = self.log_public_words() - LOG_WORDS_PER_ELEM;
+		let pubcheck_point = eval_point_high[..log_public_elems].to_vec();
+		let pubcheck_claim = evaluate_inplace_scalars(public_elems, &pubcheck_point);
+
+		let batch_coeff = channel.sample();
+		let batched_claim = sumcheck_claim + batch_coeff.clone() * pubcheck_claim;
+
+		let transparent = Box::new(move |point: &[Channel::Elem]| {
+			let rs_eq_eval =
+				ring_switch::eval_rs_eq(&eval_point_high, point, eq_r_double_prime.as_ref());
+			let pubcheck_eq_eval = eval_pubcheck_eq(&pubcheck_point, point);
+			rs_eq_eval + batch_coeff.clone() * pubcheck_eq_eval
+		});
+
+		channel.verify_oracle_relations([OracleLinearRelation {
+			oracle: trace_oracle,
+			transparent,
+			claim: batched_claim,
+		}])?;
+
+		drop(pcs_guard);
+
+		Ok(())
+	}
 }
 
 /// Struct for verifying instances of a particular constraint system.
@@ -387,6 +558,24 @@ where
 		// Create channel and delegate to IOPVerifier::verify
 		let mut channel = self.iop_compiler.create_channel(transcript);
 		self.iop_verifier.verify(public, &mut channel)
+	}
+
+	/// Verifies a flat repeated-circuit proof using a base constraint system for the structured
+	/// Shift monster check.
+	pub fn verify_repeated<Challenger_: Challenger>(
+		&self,
+		public: &[Word],
+		base_constraint_system: &ConstraintSystem,
+		log_instances: usize,
+		transcript: &mut VerifierTranscript<Challenger_>,
+	) -> Result<(), Error> {
+		let mut channel = self.iop_compiler.create_channel(transcript);
+		self.iop_verifier.verify_repeated(
+			public,
+			base_constraint_system,
+			log_instances,
+			&mut channel,
+		)
 	}
 }
 

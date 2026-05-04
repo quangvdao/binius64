@@ -8,7 +8,11 @@ use binius_utils::checked_arithmetics::strict_log_2;
 use getset::Getters;
 use itertools::Itertools;
 
-use super::{BITAND_ARITY, INTMUL_ARITY, error::Error, evaluate_monster_multilinear_for_operation};
+use super::{
+	BITAND_ARITY, INTMUL_ARITY, RepeatedMonsterLayout, error::Error,
+	evaluate_monster_multilinear_for_operation,
+	evaluate_repeated_monster_multilinear_for_operation,
+};
 use crate::{
 	config::LOG_WORD_SIZE_BITS,
 	protocols::sumcheck::{SumcheckOutput, verify as verify_sumcheck},
@@ -142,6 +146,54 @@ where
 	F: BinaryField,
 	C: IPVerifierChannel<F>,
 {
+	let log_word_count = strict_log_2(constraint_system.value_vec_layout.committed_total_len)
+		.expect("constraints preprocessed");
+
+	verify_with_log_word_count(log_word_count, bitand_data, intmul_data, channel)
+}
+
+/// Verifies the shift protocol for a flat proof of repeated identical copies of a base constraint
+/// system.
+///
+/// This differs from [`verify`] only in how it derives the word-index domain size. The prover may
+/// still use a materialized flat repeated witness, while the verifier keeps only the base circuit
+/// shape plus `log_instances`.
+///
+/// The caller remains responsible for binding the base circuit digest, repeated layout, and
+/// `log_instances` into the outer transcript before these challenges are sampled.
+pub fn verify_repeated<F, C>(
+	base_constraint_system: &ConstraintSystem,
+	log_instances: usize,
+	bitand_data: &OperatorData<C::Elem, BITAND_ARITY>,
+	intmul_data: &OperatorData<C::Elem, INTMUL_ARITY>,
+	channel: &mut C,
+) -> Result<VerifyOutput<C::Elem>, Error>
+where
+	F: BinaryField,
+	C: IPVerifierChannel<F>,
+{
+	let base_log_word_count =
+		strict_log_2(base_constraint_system.value_vec_layout.committed_total_len)
+			.expect("base constraints preprocessed");
+
+	verify_with_log_word_count(
+		base_log_word_count + log_instances,
+		bitand_data,
+		intmul_data,
+		channel,
+	)
+}
+
+fn verify_with_log_word_count<F, C>(
+	log_word_count: usize,
+	bitand_data: &OperatorData<C::Elem, BITAND_ARITY>,
+	intmul_data: &OperatorData<C::Elem, INTMUL_ARITY>,
+	channel: &mut C,
+) -> Result<VerifyOutput<C::Elem>, Error>
+where
+	F: BinaryField,
+	C: IPVerifierChannel<F>,
+{
 	let bitand_lambda = channel.sample();
 	let intmul_lambda = channel.sample();
 
@@ -159,9 +211,6 @@ where
 	// Thus `r_s` are the more significant variables.
 	let r_s = r_jr_s.split_off(LOG_WORD_SIZE_BITS);
 	let r_j = r_jr_s;
-
-	let log_word_count = strict_log_2(constraint_system.value_vec_layout.committed_total_len)
-		.expect("constraints preprocessed");
 
 	let SumcheckOutput {
 		eval,
@@ -266,6 +315,90 @@ where
 	// The protocol could compute this witness value instead of reading it from the prover. This
 	// would require inverting a random element, however, making the protocol incomplete with
 	// negligible probability. As a matter of taste, we read the witness value from the prover.
+	let expected_eval = witness_eval.clone() * monster_eval;
+	channel.assert_zero(expected_eval - eval)?;
+
+	Ok(())
+}
+
+/// Validates Shift evaluation claims for a repeated identical circuit descriptor.
+///
+/// This is the verifier-side structured counterpart to [`check_eval`]. It checks the same final
+/// equation, but evaluates the monster multilinear by scanning the base constraint system once and
+/// collapsing the repeated instance axis with an equality-kernel factor.
+///
+/// The base constraint system must use local value indices. Concrete per-instance public values
+/// belong in public slots or committed public-data rows, not in the base constants vector.
+pub fn check_eval_repeated<F, C>(
+	base_constraint_system: &ConstraintSystem,
+	log_instances: usize,
+	bitand_data: &OperatorData<C::Elem, BITAND_ARITY>,
+	intmul_data: &OperatorData<C::Elem, INTMUL_ARITY>,
+	subspace: &BinarySubspace<F>,
+	output: &VerifyOutput<C::Elem>,
+	channel: &mut C,
+) -> Result<(), Error>
+where
+	F: BinaryField,
+	C: IPVerifierChannel<F>,
+	C::Elem: FieldOps<Scalar = F> + From<F>,
+{
+	let VerifyOutput {
+		bitand_lambda,
+		intmul_lambda,
+		eval,
+		r_j,
+		r_s,
+		r_y,
+		witness_eval,
+	} = output;
+
+	let base_value_count = base_constraint_system.value_vec_layout.committed_total_len;
+
+	let monster_eval_for_bitand = {
+		let (a, b, c) = base_constraint_system
+			.and_constraints
+			.iter()
+			.map(|AndConstraint { a, b, c }| (a, b, c))
+			.multiunzip();
+		evaluate_repeated_monster_multilinear_for_operation(
+			&[a, b, c],
+			bitand_data,
+			subspace,
+			bitand_lambda.clone(),
+			r_j,
+			r_s,
+			r_y,
+			RepeatedMonsterLayout::new(
+				log_instances,
+				base_constraint_system.and_constraints.len(),
+				base_value_count,
+			),
+		)
+	}?;
+	let monster_eval_for_intmul = {
+		let (a, b, lo, hi) = base_constraint_system
+			.mul_constraints
+			.iter()
+			.map(|MulConstraint { a, b, hi, lo }| (a, b, lo, hi))
+			.multiunzip();
+		evaluate_repeated_monster_multilinear_for_operation(
+			&[a, b, lo, hi],
+			intmul_data,
+			subspace,
+			intmul_lambda.clone(),
+			r_j,
+			r_s,
+			r_y,
+			RepeatedMonsterLayout::new(
+				log_instances,
+				base_constraint_system.mul_constraints.len(),
+				base_value_count,
+			),
+		)
+	}?;
+	let monster_eval = monster_eval_for_bitand + monster_eval_for_intmul;
+
 	let expected_eval = witness_eval.clone() * monster_eval;
 	channel.assert_zero(expected_eval - eval)?;
 

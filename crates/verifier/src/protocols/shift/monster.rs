@@ -10,7 +10,10 @@ use binius_field::{BinaryField, FieldOps, util::powers};
 use binius_math::{
 	BinarySubspace,
 	inner_product::inner_product_scalars,
-	multilinear::{eq::eq_ind_partial_eval_scalars, evaluate::evaluate_inplace_scalars},
+	multilinear::{
+		eq::{eq_ind, eq_ind_partial_eval_scalars},
+		evaluate::evaluate_inplace_scalars,
+	},
 	univariate::lagrange_evals_scalars,
 };
 
@@ -159,6 +162,122 @@ where
 	Ok(eval)
 }
 
+/// Tensor layout for a batch of identical operation constraints.
+///
+/// This describes a flat materialization where both constraint and value indices are laid out as:
+///
+/// ```text
+/// flat_index = instance * base_len + local_index
+/// ```
+///
+/// Equivalently, the low multilinear variables address the local base circuit and the high
+/// variables address the repeated instance axis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RepeatedMonsterLayout {
+	/// Number of instance-axis multilinear variables.
+	pub log_instances: usize,
+	/// Number of constraints in the base operation after operation-specific padding.
+	pub base_constraint_count: usize,
+	/// Number of committed values in the base circuit after value-vector padding.
+	pub base_value_count: usize,
+}
+
+impl RepeatedMonsterLayout {
+	/// Creates a repeated monster layout.
+	///
+	/// # Panics
+	///
+	/// Panics if either base size is not a power of two.
+	pub fn new(
+		log_instances: usize,
+		base_constraint_count: usize,
+		base_value_count: usize,
+	) -> Self {
+		assert!(
+			base_constraint_count.is_power_of_two(),
+			"base constraint count must be a power of two"
+		);
+		assert!(base_value_count.is_power_of_two(), "base value count must be a power of two");
+		Self {
+			log_instances,
+			base_constraint_count,
+			base_value_count,
+		}
+	}
+
+	fn base_log_constraints(self) -> usize {
+		self.base_constraint_count.ilog2() as usize
+	}
+
+	fn base_log_values(self) -> usize {
+		self.base_value_count.ilog2() as usize
+	}
+}
+
+/// Evaluates the monster multilinear for a repeated identical operation without scanning every
+/// materialized instance.
+///
+/// `base_operand_vecs` must contain local base-circuit value indices. The verifier challenges must
+/// be the same challenges that would be used for the flat materialization with:
+///
+/// ```text
+/// flat_constraint = instance * base_constraint_count + local_constraint
+/// flat_value      = instance * base_value_count      + local_value
+/// ```
+///
+/// The instance axis collapses via:
+///
+/// ```text
+/// sum_u eq(r_x_instance, u) * eq(r_y_instance, u) = eq(r_x_instance, r_y_instance)
+/// ```
+pub fn evaluate_repeated_monster_multilinear_for_operation<F, E, const ARITY: usize>(
+	base_operand_vecs: &[Vec<&Operand>],
+	operator_data: &OperatorData<E, ARITY>,
+	subspace: &BinarySubspace<F>,
+	lambda: E,
+	r_j: &[E],
+	r_s: &[E],
+	r_y: &[E],
+	layout: RepeatedMonsterLayout,
+) -> Result<E, Error>
+where
+	F: BinaryField,
+	E: FieldOps<Scalar = F> + From<F>,
+{
+	assert_eq!(subspace.dim(), LOG_WORD_SIZE_BITS); // precondition
+	assert_eq!(base_operand_vecs.len(), ARITY);
+	for operands in base_operand_vecs {
+		assert_eq!(operands.len(), layout.base_constraint_count);
+	}
+
+	let base_log_constraints = layout.base_log_constraints();
+	let base_log_values = layout.base_log_values();
+
+	assert_eq!(operator_data.r_x_prime.len(), base_log_constraints + layout.log_instances);
+	assert_eq!(r_y.len(), base_log_values + layout.log_instances);
+
+	let (r_x_local, r_x_instance) = operator_data.r_x_prime.split_at(base_log_constraints);
+	let (r_y_local, r_y_instance) = r_y.split_at(base_log_values);
+
+	let r_x_local_tensor = eq_ind_partial_eval_scalars(r_x_local);
+	let r_y_local_tensor = eq_ind_partial_eval_scalars(r_y_local);
+	let instance_factor = eq_ind(r_x_instance, r_y_instance);
+
+	let l_tilde = lagrange_evals_scalars(subspace, operator_data.r_zhat_prime.clone());
+	let h_op_evals = evaluate_h_op(&l_tilde, r_j, r_s);
+
+	let lambda_powers = powers(lambda).skip(1).take(ARITY).collect::<Vec<_>>();
+	let evals =
+		evaluate_matrices(base_operand_vecs, &lambda_powers, &r_x_local_tensor, &r_y_local_tensor);
+
+	let eval = inner_product_scalars(
+		evals.map(|mut evals_op| evaluate_inplace_scalars(&mut evals_op[..], r_s)),
+		h_op_evals,
+	);
+
+	Ok(instance_factor * eval)
+}
+
 /// Calculate a batched sum of the M_{\text{op}}(r'_x, r_y, s) matrices.
 ///
 /// Computes one evaluation per shift op, shift amount pair. The matrix evaluations are scaled by
@@ -231,15 +350,397 @@ fn evaluate_matrices<F: BinaryField, E: FieldOps<Scalar = F> + From<F>>(
 
 #[cfg(test)]
 mod tests {
+	use std::{
+		array,
+		hint::black_box,
+		time::{Duration, Instant},
+	};
+
+	use crate::protocols::shift::{BITAND_ARITY, INTMUL_ARITY};
+	use binius_core::constraint_system::{AndConstraint, MulConstraint, Operand, ValueIndex};
 	use binius_field::{BinaryField128bGhash, Field, Random};
 	use binius_math::{
 		BinarySubspace,
 		test_utils::{index_to_hypercube_point, random_scalars},
 		univariate::lagrange_evals_scalars,
 	};
+	use itertools::Itertools;
 	use rand::{Rng, SeedableRng, rngs::StdRng};
 
 	use super::*;
+
+	fn average_elapsed(iterations: usize, mut f: impl FnMut()) -> Duration {
+		let start = Instant::now();
+		for _ in 0..iterations {
+			f();
+		}
+		start.elapsed() / iterations as u32
+	}
+
+	fn test_term(value_index: usize, seed: usize) -> ShiftedValueIndex {
+		let value_index = ValueIndex(value_index as u32);
+		let amount = (seed * 7 + 3) % WORD_SIZE_BITS;
+		match seed % SHIFT_VARIANT_COUNT {
+			0 => ShiftedValueIndex::plain(value_index),
+			1 => ShiftedValueIndex::sll(value_index, amount),
+			2 => ShiftedValueIndex::srl(value_index, amount),
+			3 => ShiftedValueIndex::sar(value_index, amount),
+			4 => ShiftedValueIndex::rotr(value_index, amount),
+			5 => ShiftedValueIndex::sll32(value_index, amount % 32),
+			6 => ShiftedValueIndex::srl32(value_index, amount % 32),
+			_ => ShiftedValueIndex::sra32(value_index, amount % 32),
+		}
+	}
+
+	fn offset_operand(operand: &Operand, offset: usize) -> Operand {
+		operand
+			.iter()
+			.map(|term| ShiftedValueIndex {
+				value_index: ValueIndex(term.value_index.0 + offset as u32),
+				shift_variant: term.shift_variant,
+				amount: term.amount,
+			})
+			.collect()
+	}
+
+	fn make_base_and_constraints(
+		base_constraint_count: usize,
+		base_value_count: usize,
+	) -> Vec<AndConstraint> {
+		(0..base_constraint_count)
+			.map(|row| AndConstraint {
+				a: vec![
+					test_term((row * 3 + 1) % base_value_count, row),
+					test_term((row * 5 + 7) % base_value_count, row + 1),
+				],
+				b: vec![
+					test_term((row * 11 + 13) % base_value_count, row + 2),
+					test_term((row * 17 + 19) % base_value_count, row + 3),
+				],
+				c: vec![
+					test_term((row * 23 + 29) % base_value_count, row + 4),
+					test_term((row * 31 + 37) % base_value_count, row + 5),
+				],
+			})
+			.collect()
+	}
+
+	fn repeat_and_constraints(
+		base_constraints: &[AndConstraint],
+		log_instances: usize,
+		base_value_count: usize,
+	) -> Vec<AndConstraint> {
+		let instances = 1 << log_instances;
+		let mut constraints = Vec::with_capacity(instances * base_constraints.len());
+		for instance in 0..instances {
+			let value_offset = instance * base_value_count;
+			for constraint in base_constraints {
+				constraints.push(AndConstraint {
+					a: offset_operand(&constraint.a, value_offset),
+					b: offset_operand(&constraint.b, value_offset),
+					c: offset_operand(&constraint.c, value_offset),
+				});
+			}
+		}
+		constraints
+	}
+
+	fn make_base_mul_constraints(
+		base_constraint_count: usize,
+		base_value_count: usize,
+	) -> Vec<MulConstraint> {
+		(0..base_constraint_count)
+			.map(|row| MulConstraint {
+				a: vec![
+					test_term((row * 3 + 2) % base_value_count, row),
+					test_term((row * 5 + 11) % base_value_count, row + 1),
+				],
+				b: vec![
+					test_term((row * 7 + 17) % base_value_count, row + 2),
+					test_term((row * 13 + 23) % base_value_count, row + 3),
+				],
+				lo: vec![
+					test_term((row * 19 + 31) % base_value_count, row + 4),
+					test_term((row * 29 + 41) % base_value_count, row + 5),
+				],
+				hi: vec![
+					test_term((row * 37 + 43) % base_value_count, row + 6),
+					test_term((row * 47 + 53) % base_value_count, row + 7),
+				],
+			})
+			.collect()
+	}
+
+	fn repeat_mul_constraints(
+		base_constraints: &[MulConstraint],
+		log_instances: usize,
+		base_value_count: usize,
+	) -> Vec<MulConstraint> {
+		let instances = 1 << log_instances;
+		let mut constraints = Vec::with_capacity(instances * base_constraints.len());
+		for instance in 0..instances {
+			let value_offset = instance * base_value_count;
+			for constraint in base_constraints {
+				constraints.push(MulConstraint {
+					a: offset_operand(&constraint.a, value_offset),
+					b: offset_operand(&constraint.b, value_offset),
+					lo: offset_operand(&constraint.lo, value_offset),
+					hi: offset_operand(&constraint.hi, value_offset),
+				});
+			}
+		}
+		constraints
+	}
+
+	#[test]
+	fn repeated_monster_eval_matches_flat_large_and_materialization() {
+		type F = BinaryField128bGhash;
+
+		let mut rng = StdRng::seed_from_u64(1);
+		let base_constraint_count = 1 << 8;
+		let base_value_count = 1 << 9;
+		let log_instances = 8;
+
+		let base_constraints = make_base_and_constraints(base_constraint_count, base_value_count);
+		let flat_constraints =
+			repeat_and_constraints(&base_constraints, log_instances, base_value_count);
+		assert_eq!(flat_constraints.len(), 1 << 16);
+
+		let operator_data: OperatorData<F, BITAND_ARITY> = OperatorData::new(
+			F::random(&mut rng),
+			random_scalars(&mut rng, base_constraint_count.ilog2() as usize + log_instances),
+			array::from_fn(|_| F::random(&mut rng)),
+		);
+		let subspace = BinarySubspace::<F>::with_dim(LOG_WORD_SIZE_BITS);
+		let lambda = F::random(&mut rng);
+		let r_j = random_scalars(&mut rng, LOG_WORD_SIZE_BITS);
+		let r_s = random_scalars(&mut rng, LOG_WORD_SIZE_BITS);
+		let r_y = random_scalars(&mut rng, base_value_count.ilog2() as usize + log_instances);
+
+		let (base_a, base_b, base_c) = base_constraints
+			.iter()
+			.map(|AndConstraint { a, b, c }| (a, b, c))
+			.multiunzip();
+		let (flat_a, flat_b, flat_c) = flat_constraints
+			.iter()
+			.map(|AndConstraint { a, b, c }| (a, b, c))
+			.multiunzip();
+
+		let flat = evaluate_monster_multilinear_for_operation(
+			&[flat_a, flat_b, flat_c],
+			&operator_data,
+			&subspace,
+			lambda,
+			&r_j,
+			&r_s,
+			&r_y,
+		)
+		.unwrap();
+		let repeated = evaluate_repeated_monster_multilinear_for_operation(
+			&[base_a, base_b, base_c],
+			&operator_data,
+			&subspace,
+			lambda,
+			&r_j,
+			&r_s,
+			&r_y,
+			RepeatedMonsterLayout::new(log_instances, base_constraint_count, base_value_count),
+		)
+		.unwrap();
+
+		assert_eq!(repeated, flat);
+	}
+
+	#[test]
+	fn repeated_monster_eval_matches_flat_mul_materialization() {
+		type F = BinaryField128bGhash;
+
+		let mut rng = StdRng::seed_from_u64(2);
+		let base_constraint_count = 1 << 7;
+		let base_value_count = 1 << 8;
+		let log_instances = 7;
+
+		let base_constraints = make_base_mul_constraints(base_constraint_count, base_value_count);
+		let flat_constraints =
+			repeat_mul_constraints(&base_constraints, log_instances, base_value_count);
+		assert_eq!(flat_constraints.len(), 1 << 14);
+
+		let operator_data: OperatorData<F, INTMUL_ARITY> = OperatorData::new(
+			F::random(&mut rng),
+			random_scalars(&mut rng, base_constraint_count.ilog2() as usize + log_instances),
+			array::from_fn(|_| F::random(&mut rng)),
+		);
+		let subspace = BinarySubspace::<F>::with_dim(LOG_WORD_SIZE_BITS);
+		let lambda = F::random(&mut rng);
+		let r_j = random_scalars(&mut rng, LOG_WORD_SIZE_BITS);
+		let r_s = random_scalars(&mut rng, LOG_WORD_SIZE_BITS);
+		let r_y = random_scalars(&mut rng, base_value_count.ilog2() as usize + log_instances);
+
+		let (base_a, base_b, base_lo, base_hi) = base_constraints
+			.iter()
+			.map(|MulConstraint { a, b, lo, hi }| (a, b, lo, hi))
+			.multiunzip();
+		let (flat_a, flat_b, flat_lo, flat_hi) = flat_constraints
+			.iter()
+			.map(|MulConstraint { a, b, lo, hi }| (a, b, lo, hi))
+			.multiunzip();
+
+		let flat = evaluate_monster_multilinear_for_operation(
+			&[flat_a, flat_b, flat_lo, flat_hi],
+			&operator_data,
+			&subspace,
+			lambda,
+			&r_j,
+			&r_s,
+			&r_y,
+		)
+		.unwrap();
+		let repeated = evaluate_repeated_monster_multilinear_for_operation(
+			&[base_a, base_b, base_lo, base_hi],
+			&operator_data,
+			&subspace,
+			lambda,
+			&r_j,
+			&r_s,
+			&r_y,
+			RepeatedMonsterLayout::new(log_instances, base_constraint_count, base_value_count),
+		)
+		.unwrap();
+
+		assert_eq!(repeated, flat);
+	}
+
+	#[test]
+	#[ignore = "prints concrete verifier-side runtimes for flat vs repeated monster evaluation"]
+	fn repeated_monster_eval_print_runtimes() {
+		type F = BinaryField128bGhash;
+
+		let base_constraint_count = 1 << 8;
+		let base_value_count = 1 << 9;
+		let base_constraints = make_base_and_constraints(base_constraint_count, base_value_count);
+		let (base_a, base_b, base_c): (Vec<_>, Vec<_>, Vec<_>) = base_constraints
+			.iter()
+			.map(|AndConstraint { a, b, c }| (a, b, c))
+			.multiunzip();
+		let base_operands = [base_a, base_b, base_c];
+		let subspace = BinarySubspace::<F>::with_dim(LOG_WORD_SIZE_BITS);
+
+		println!("base_constraints={base_constraint_count}, base_values={base_value_count}");
+		println!("log_instances,instances,flat_constraints,flat_ms,repeated_ms,speedup");
+
+		for log_instances in [0usize, 4, 8, 10, 12] {
+			let mut rng = StdRng::seed_from_u64(10_000 + log_instances as u64);
+			let flat_constraints =
+				repeat_and_constraints(&base_constraints, log_instances, base_value_count);
+			let (flat_a, flat_b, flat_c): (Vec<_>, Vec<_>, Vec<_>) = flat_constraints
+				.iter()
+				.map(|AndConstraint { a, b, c }| (a, b, c))
+				.multiunzip();
+			let flat_operands = [flat_a, flat_b, flat_c];
+
+			let operator_data: OperatorData<F, BITAND_ARITY> = OperatorData::new(
+				F::random(&mut rng),
+				random_scalars(&mut rng, base_constraint_count.ilog2() as usize + log_instances),
+				array::from_fn(|_| F::random(&mut rng)),
+			);
+			let lambda = F::random(&mut rng);
+			let r_j = random_scalars(&mut rng, LOG_WORD_SIZE_BITS);
+			let r_s = random_scalars(&mut rng, LOG_WORD_SIZE_BITS);
+			let r_y = random_scalars(&mut rng, base_value_count.ilog2() as usize + log_instances);
+
+			let flat = evaluate_monster_multilinear_for_operation(
+				&flat_operands,
+				&operator_data,
+				&subspace,
+				lambda,
+				&r_j,
+				&r_s,
+				&r_y,
+			)
+			.unwrap();
+
+			let repeated_layout =
+				RepeatedMonsterLayout::new(log_instances, base_constraint_count, base_value_count);
+			let repeated = evaluate_repeated_monster_multilinear_for_operation(
+				&base_operands,
+				&operator_data,
+				&subspace,
+				lambda,
+				&r_j,
+				&r_s,
+				&r_y,
+				repeated_layout,
+			)
+			.unwrap();
+			assert_eq!(repeated, flat);
+
+			let iterations = match log_instances {
+				0 | 4 => 256,
+				8 => 64,
+				10 => 32,
+				_ => 8,
+			};
+			let flat_elapsed = average_elapsed(iterations, || {
+				let eval = evaluate_monster_multilinear_for_operation(
+					&flat_operands,
+					&operator_data,
+					&subspace,
+					lambda,
+					&r_j,
+					&r_s,
+					&r_y,
+				)
+				.unwrap();
+				black_box(eval);
+			});
+			let repeated_elapsed = average_elapsed(iterations, || {
+				let eval = evaluate_repeated_monster_multilinear_for_operation(
+					&base_operands,
+					&operator_data,
+					&subspace,
+					lambda,
+					&r_j,
+					&r_s,
+					&r_y,
+					repeated_layout,
+				)
+				.unwrap();
+				black_box(eval);
+			});
+
+			let flat_again = evaluate_monster_multilinear_for_operation(
+				&flat_operands,
+				&operator_data,
+				&subspace,
+				lambda,
+				&r_j,
+				&r_s,
+				&r_y,
+			)
+			.unwrap();
+			let repeated_again = evaluate_repeated_monster_multilinear_for_operation(
+				&base_operands,
+				&operator_data,
+				&subspace,
+				lambda,
+				&r_j,
+				&r_s,
+				&r_y,
+				repeated_layout,
+			)
+			.unwrap();
+			assert_eq!(flat_again, repeated_again);
+
+			let flat_ms = flat_elapsed.as_secs_f64() * 1_000.0;
+			let repeated_ms = repeated_elapsed.as_secs_f64() * 1_000.0;
+			println!(
+				"{log_instances},{},{},{flat_ms:.3},{repeated_ms:.3},{:.1}x",
+				1usize << log_instances,
+				flat_constraints.len(),
+				flat_ms / repeated_ms,
+			);
+		}
+	}
 
 	#[test]
 	fn test_evaluate_h_op_hypercube_vertices() {

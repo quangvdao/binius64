@@ -566,3 +566,272 @@ fn build_intmul_witness(mul_constraints: &[MulConstraint], witness: &ValueVec) -
 
 	MulCheckWitness { a, b, lo, hi }
 }
+
+#[cfg(test)]
+mod tests {
+	use std::time::{Duration, Instant};
+
+	use binius_core::{
+		ShiftVariant,
+		constraint_system::{
+			AndConstraint, ConstraintSystem, MulConstraint, Operand, ShiftedValueIndex, ValueIndex,
+			ValueVec, ValueVecLayout,
+		},
+		verify::verify_constraints,
+		word::Word,
+	};
+	use binius_field::arch::OptimalPackedB128;
+	use binius_transcript::ProverTranscript;
+	use binius_verifier::{
+		Verifier,
+		config::StdChallenger,
+		hash::{StdCompression, StdDigest},
+	};
+
+	use crate::{Prover, hash::parallel_compression::ParallelCompressionAdaptor};
+
+	fn elapsed_for<T>(f: impl FnOnce() -> T) -> (T, Duration) {
+		let start = Instant::now();
+		let value = f();
+		(value, start.elapsed())
+	}
+
+	fn average_elapsed(iterations: usize, mut f: impl FnMut()) -> Duration {
+		let start = Instant::now();
+		for _ in 0..iterations {
+			f();
+		}
+		start.elapsed() / iterations as u32
+	}
+
+	fn test_term(value_index: usize, seed: usize) -> ShiftedValueIndex {
+		let value_index = ValueIndex(value_index as u32);
+		let amount = (seed * 7 + 3) % 64;
+		if amount == 0 {
+			return ShiftedValueIndex::plain(value_index);
+		}
+		let shift_variant = match seed % 4 {
+			0 => ShiftVariant::Sll,
+			1 => ShiftVariant::Slr,
+			2 => ShiftVariant::Sar,
+			_ => ShiftVariant::Rotr,
+		};
+		ShiftedValueIndex {
+			value_index,
+			shift_variant,
+			amount,
+		}
+	}
+
+	fn offset_operand(operand: &Operand, offset: usize) -> Operand {
+		operand
+			.iter()
+			.map(|term| ShiftedValueIndex {
+				value_index: ValueIndex(term.value_index.0 + offset as u32),
+				shift_variant: term.shift_variant,
+				amount: term.amount,
+			})
+			.collect()
+	}
+
+	fn value_vec_layout(value_count: usize) -> ValueVecLayout {
+		assert!(value_count.is_power_of_two());
+		assert!(value_count >= 2);
+		ValueVecLayout {
+			n_const: 0,
+			n_inout: 2,
+			n_witness: value_count - 2,
+			n_internal: 0,
+			offset_inout: 0,
+			offset_witness: 2,
+			committed_total_len: value_count,
+			n_scratch: 0,
+		}
+	}
+
+	fn make_base_constraint_system(
+		base_constraint_count: usize,
+		base_value_count: usize,
+	) -> ConstraintSystem {
+		let and_constraints = (0..base_constraint_count)
+			.map(|row| AndConstraint {
+				a: vec![
+					test_term((row * 3 + 1) % base_value_count, row),
+					test_term((row * 5 + 7) % base_value_count, row + 1),
+				],
+				b: vec![
+					test_term((row * 11 + 13) % base_value_count, row + 2),
+					test_term((row * 17 + 19) % base_value_count, row + 3),
+				],
+				c: vec![
+					test_term((row * 23 + 29) % base_value_count, row + 4),
+					test_term((row * 31 + 37) % base_value_count, row + 5),
+				],
+			})
+			.collect();
+
+		let mut constraint_system = ConstraintSystem::new(
+			Vec::new(),
+			value_vec_layout(base_value_count),
+			and_constraints,
+			Vec::new(),
+		);
+		constraint_system
+			.validate_and_prepare()
+			.expect("constructed base constraint system is valid");
+		constraint_system
+	}
+
+	fn repeat_and_constraints(
+		base_constraints: &[AndConstraint],
+		log_instances: usize,
+		base_value_count: usize,
+	) -> Vec<AndConstraint> {
+		let instances = 1 << log_instances;
+		let mut constraints = Vec::with_capacity(instances * base_constraints.len());
+		for instance in 0..instances {
+			let value_offset = instance * base_value_count;
+			for constraint in base_constraints {
+				constraints.push(AndConstraint {
+					a: offset_operand(&constraint.a, value_offset),
+					b: offset_operand(&constraint.b, value_offset),
+					c: offset_operand(&constraint.c, value_offset),
+				});
+			}
+		}
+		constraints
+	}
+
+	fn repeat_mul_constraints(
+		base_constraints: &[MulConstraint],
+		log_instances: usize,
+		base_value_count: usize,
+	) -> Vec<MulConstraint> {
+		let instances = 1 << log_instances;
+		let mut constraints = Vec::with_capacity(instances * base_constraints.len());
+		for instance in 0..instances {
+			let value_offset = instance * base_value_count;
+			for constraint in base_constraints {
+				constraints.push(MulConstraint {
+					a: offset_operand(&constraint.a, value_offset),
+					b: offset_operand(&constraint.b, value_offset),
+					lo: offset_operand(&constraint.lo, value_offset),
+					hi: offset_operand(&constraint.hi, value_offset),
+				});
+			}
+		}
+		constraints
+	}
+
+	fn make_flat_repeated_constraint_system(
+		base: &ConstraintSystem,
+		log_instances: usize,
+	) -> ConstraintSystem {
+		let base_value_count = base.value_vec_layout.committed_total_len;
+		let value_count = base_value_count << log_instances;
+		ConstraintSystem::new(
+			Vec::new(),
+			value_vec_layout(value_count),
+			repeat_and_constraints(&base.and_constraints, log_instances, base_value_count),
+			repeat_mul_constraints(&base.mul_constraints, log_instances, base_value_count),
+		)
+	}
+
+	fn zero_value_vec(constraint_system: &ConstraintSystem) -> ValueVec {
+		ValueVec::new_from_data(
+			constraint_system.value_vec_layout.clone(),
+			vec![Word::ZERO; constraint_system.value_vec_layout.offset_witness],
+			vec![
+				Word::ZERO;
+				constraint_system.value_vec_layout.committed_total_len
+					- constraint_system.value_vec_layout.offset_witness
+			],
+		)
+		.expect("zero value vector has matching layout")
+	}
+
+	#[test]
+	#[ignore = "prints end-to-end flat verifier vs repeated verifier runtimes"]
+	fn repeated_e2e_verifier_print_runtimes() {
+		const LOG_INV_RATE: usize = 1;
+		let base_constraint_count = 1 << 8;
+		let base_value_count = 1 << 9;
+		let base_constraint_system =
+			make_base_constraint_system(base_constraint_count, base_value_count);
+
+		println!(
+			"End-to-end verifier timing with flat prover, flat PCS, flat public IO, and structured repeated Shift monster check."
+		);
+		println!(
+			"Base shape: {base_constraint_count} AND rows, {} MUL row, {base_value_count} values",
+			base_constraint_system.mul_constraints.len()
+		);
+		println!(
+			"log_instances,instances,flat_and_constraints,prove_ms,flat_verify_ms,repeated_verify_ms,speedup"
+		);
+
+		for log_instances in [0usize, 4, 8, 10] {
+			let flat_constraint_system =
+				make_flat_repeated_constraint_system(&base_constraint_system, log_instances);
+			let value_vec = zero_value_vec(&flat_constraint_system);
+			verify_constraints(&flat_constraint_system, &value_vec)
+				.expect("zero witness satisfies the repeated toy circuit");
+
+			let verifier = Verifier::<StdDigest, _>::setup(
+				flat_constraint_system.clone(),
+				LOG_INV_RATE,
+				StdCompression::default(),
+			)
+			.expect("flat verifier setup succeeds");
+			let prover = Prover::<OptimalPackedB128, _, StdDigest>::setup(
+				verifier.clone(),
+				ParallelCompressionAdaptor::new(StdCompression::default()),
+			)
+			.expect("flat prover setup succeeds");
+
+			let (prover_transcript, prove_elapsed) = elapsed_for(|| {
+				let mut prover_transcript = ProverTranscript::new(StdChallenger::default());
+				prover
+					.prove(value_vec.clone(), &mut prover_transcript)
+					.expect("flat prover succeeds");
+				prover_transcript
+			});
+
+			let verify_iterations = if log_instances >= 8 { 8 } else { 32 };
+			let flat_verify_elapsed = average_elapsed(verify_iterations, || {
+				let mut verifier_transcript = prover_transcript.clone().into_verifier();
+				verifier
+					.verify(value_vec.public(), &mut verifier_transcript)
+					.expect("flat verifier accepts");
+				verifier_transcript
+					.finalize()
+					.expect("flat transcript is exhausted");
+			});
+
+			let repeated_verify_elapsed = average_elapsed(verify_iterations, || {
+				let mut verifier_transcript = prover_transcript.clone().into_verifier();
+				verifier
+					.verify_repeated(
+						value_vec.public(),
+						&base_constraint_system,
+						log_instances,
+						&mut verifier_transcript,
+					)
+					.expect("repeated verifier accepts");
+				verifier_transcript
+					.finalize()
+					.expect("repeated transcript is exhausted");
+			});
+
+			let prove_ms = prove_elapsed.as_secs_f64() * 1_000.0;
+			let flat_verify_ms = flat_verify_elapsed.as_secs_f64() * 1_000.0;
+			let repeated_verify_ms = repeated_verify_elapsed.as_secs_f64() * 1_000.0;
+			println!(
+				"{log_instances},{},{},{prove_ms:.3},{flat_verify_ms:.3},{repeated_verify_ms:.3},{:.2}x",
+				1usize << log_instances,
+				flat_constraint_system.and_constraints.len(),
+				flat_verify_ms / repeated_verify_ms,
+			);
+		}
+	}
+}
