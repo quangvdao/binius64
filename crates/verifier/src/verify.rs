@@ -498,6 +498,19 @@ where
 		})
 	}
 
+	/// Constructs a verifier for the flat expansion of a repeated identical constraint system.
+	///
+	/// The returned verifier still verifies the flat witness oracle and public input section.
+	/// Call [`Self::verify_repeated`] with the same descriptor to use the structured repeated
+	/// Shift check.
+	pub fn setup_repeated(
+		repeated: &RepeatedConstraintSystem,
+		log_inv_rate: usize,
+		compression: MerkleCompress,
+	) -> Result<Self, Error> {
+		Self::setup(repeated.to_flat_constraint_system(), log_inv_rate, compression)
+	}
+
 	/// Returns a reference to the IOP verifier.
 	pub fn iop_verifier(&self) -> &IOPVerifier {
 		&self.iop_verifier

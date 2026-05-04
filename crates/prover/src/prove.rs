@@ -922,12 +922,12 @@ mod tests {
 		verify_constraints(&flat_constraint_system, &value_vec)
 			.expect("zero witness satisfies the repeated toy circuit");
 
-		let verifier = Verifier::<StdDigest, _>::setup(
-			flat_constraint_system.clone(),
+		let verifier = Verifier::<StdDigest, _>::setup_repeated(
+			&repeated,
 			LOG_INV_RATE,
 			StdCompression::default(),
 		)
-		.expect("flat verifier setup succeeds");
+		.expect("repeated verifier setup succeeds");
 		let prover = Prover::<OptimalPackedB128, _, StdDigest>::setup(
 			verifier.clone(),
 			ParallelCompressionAdaptor::new(StdCompression::default()),
@@ -1020,12 +1020,12 @@ mod tests {
 		verify_constraints(&flat_constraint_system, &value_vec)
 			.expect("witness satisfies repeated circuit with shared constants");
 
-		let verifier = Verifier::<StdDigest, _>::setup(
-			flat_constraint_system,
+		let verifier = Verifier::<StdDigest, _>::setup_repeated(
+			&repeated,
 			LOG_INV_RATE,
 			StdCompression::default(),
 		)
-		.expect("flat verifier setup succeeds");
+		.expect("repeated verifier setup succeeds");
 		let prover = Prover::<OptimalPackedB128, _, StdDigest>::setup_repeated(
 			verifier.clone(),
 			ParallelCompressionAdaptor::new(StdCompression::default()),
@@ -1146,12 +1146,12 @@ mod tests {
 			verify_constraints(&flat_constraint_system, &value_vec)
 				.expect("zero witness satisfies the repeated toy circuit");
 
-			let verifier = Verifier::<StdDigest, _>::setup(
-				flat_constraint_system.clone(),
+			let verifier = Verifier::<StdDigest, _>::setup_repeated(
+				&repeated,
 				LOG_INV_RATE,
 				StdCompression::default(),
 			)
-			.expect("flat verifier setup succeeds");
+			.expect("repeated verifier setup succeeds");
 			let prover = Prover::<OptimalPackedB128, _, StdDigest>::setup(
 				verifier.clone(),
 				ParallelCompressionAdaptor::new(StdCompression::default()),
@@ -1234,12 +1234,12 @@ mod tests {
 			verify_constraints(&flat_constraint_system, &value_vec)
 				.expect("zero witness satisfies the repeated toy circuit");
 
-			let verifier = Verifier::<StdDigest, _>::setup(
-				flat_constraint_system.clone(),
+			let verifier = Verifier::<StdDigest, _>::setup_repeated(
+				&repeated,
 				LOG_INV_RATE,
 				StdCompression::default(),
 			)
-			.expect("flat verifier setup succeeds");
+			.expect("repeated verifier setup succeeds");
 
 			let (flat_prover, flat_setup_elapsed) = elapsed_for(|| {
 				Prover::<OptimalPackedB128, _, StdDigest>::setup(
