@@ -13,7 +13,6 @@ use binius_iop_prover::{
 	basefold_channel::BaseFoldProverChannel, basefold_compiler::BaseFoldProverCompiler,
 	channel::IOPProverChannel,
 };
-use binius_ip_prover::channel::IPProverChannel;
 use binius_math::{
 	BinarySubspace, FieldBuffer, FieldSlice,
 	inner_product::inner_product,
@@ -40,7 +39,8 @@ use crate::{
 	protocols::{
 		intmul::{prove::IntMulProver, witness::Witness as IntMulWitness},
 		shift::{
-			KeyCollection, OperatorData, build_key_collection, prove as prove_shift_reduction,
+			KeyCollection, OperatorData, ShiftKeySource, build_key_collection,
+			prove_with_key_source,
 		},
 	},
 	ring_switch,
@@ -63,7 +63,28 @@ pub struct IOPProver {
 	constraint_system: ConstraintSystem,
 	log_public_words: usize,
 	log_witness_elems: usize,
-	key_collection: KeyCollection,
+	shift_keys: ShiftKeyMaterialization,
+}
+
+#[derive(Debug)]
+enum ShiftKeyMaterialization {
+	Flat(KeyCollection),
+	Repeated {
+		descriptor: RepeatedConstraintSystem,
+		base_key_collection: KeyCollection,
+	},
+}
+
+impl ShiftKeyMaterialization {
+	fn key_collection(&self) -> &KeyCollection {
+		match self {
+			Self::Flat(key_collection) => key_collection,
+			Self::Repeated {
+				base_key_collection,
+				..
+			} => base_key_collection,
+		}
+	}
 }
 
 impl IOPProver {
@@ -76,8 +97,43 @@ impl IOPProver {
 			constraint_system,
 			log_public_words,
 			log_witness_elems,
-			key_collection,
+			shift_keys: ShiftKeyMaterialization::Flat(key_collection),
 		}
+	}
+
+	/// Constructs an IOP prover for a flat repeated circuit using only the base key collection.
+	pub fn new_repeated(
+		iop_verifier: IOPVerifier,
+		repeated: RepeatedConstraintSystem,
+		base_key_collection: KeyCollection,
+	) -> Result<Self, Error> {
+		let log_public_words = iop_verifier.log_public_words();
+		let log_witness_elems = iop_verifier.log_witness_elems();
+		let constraint_system = iop_verifier.into_constraint_system();
+		if !repeated.matches_flat_shape(&constraint_system) {
+			return Err(Error::ArgumentError {
+				arg: "repeated".to_string(),
+				msg: "repeated descriptor does not match the flat constraint system shape"
+					.to_string(),
+			});
+		}
+		if base_key_collection.key_ranges.len()
+			!= repeated.base().value_vec_layout.committed_total_len
+		{
+			return Err(Error::ArgumentError {
+				arg: "base_key_collection".to_string(),
+				msg: "base key collection does not match repeated base value count".to_string(),
+			});
+		}
+		Ok(Self {
+			constraint_system,
+			log_public_words,
+			log_witness_elems,
+			shift_keys: ShiftKeyMaterialization::Repeated {
+				descriptor: repeated,
+				base_key_collection,
+			},
+		})
 	}
 
 	/// Returns the constraint system.
@@ -89,14 +145,82 @@ impl IOPProver {
 	///
 	/// This can be used to serialize the KeyCollection for later use.
 	pub fn key_collection(&self) -> &KeyCollection {
-		&self.key_collection
+		self.shift_keys.key_collection()
 	}
 
 	/// Proves using an IOP channel interface.
 	///
 	/// This is the core proving logic, independent of the specific IOP compilation strategy.
 	/// For most users, [`Prover::prove`] is the simpler interface.
-	pub fn prove<P, Channel>(&self, witness: ValueVec, mut channel: Channel) -> Result<(), Error>
+	pub fn prove<P, Channel>(&self, witness: ValueVec, channel: Channel) -> Result<(), Error>
+	where
+		P: PackedField<Scalar = B128>
+			+ PackedExtension<B128>
+			+ PackedExtension<B1>
+			+ WithUnderlier<Underlier: UnderlierWithBitOps>,
+		Channel: IOPProverChannel<P>,
+	{
+		let shift_key_source = match &self.shift_keys {
+			ShiftKeyMaterialization::Flat(key_collection) => ShiftKeySource::flat(key_collection),
+			ShiftKeyMaterialization::Repeated { .. } => {
+				return Err(Error::ArgumentError {
+					arg: "prover".to_string(),
+					msg: "prover was set up with repeated Shift keys; use prove_repeated"
+						.to_string(),
+				});
+			}
+		};
+		self.prove_with_shift_keys::<P, _>(witness, channel, shift_key_source)
+	}
+
+	/// Proves a repeated circuit using the compact repeated Shift key source.
+	pub fn prove_repeated<P, Channel>(
+		&self,
+		repeated: &RepeatedConstraintSystem,
+		witness: ValueVec,
+		mut channel: Channel,
+	) -> Result<(), Error>
+	where
+		P: PackedField<Scalar = B128>
+			+ PackedExtension<B128>
+			+ PackedExtension<B1>
+			+ WithUnderlier<Underlier: UnderlierWithBitOps>,
+		Channel: IOPProverChannel<P>,
+	{
+		if !repeated.matches_flat_shape(&self.constraint_system) {
+			return Err(Error::ArgumentError {
+				arg: "repeated".to_string(),
+				msg: "repeated descriptor does not match the flat constraint system shape"
+					.to_string(),
+			});
+		}
+
+		let shift_key_source = match &self.shift_keys {
+			ShiftKeyMaterialization::Flat(key_collection) => ShiftKeySource::flat(key_collection),
+			ShiftKeyMaterialization::Repeated {
+				descriptor,
+				base_key_collection,
+			} => {
+				if descriptor.binding_scalars() != repeated.binding_scalars() {
+					return Err(Error::ArgumentError {
+						arg: "repeated".to_string(),
+						msg: "repeated descriptor differs from prover setup".to_string(),
+					});
+				}
+				ShiftKeySource::repeated(base_key_collection, repeated)
+			}
+		};
+
+		channel.observe_many(&repeated.binding_scalars());
+		self.prove_with_shift_keys::<P, _>(witness, channel, shift_key_source)
+	}
+
+	fn prove_with_shift_keys<P, Channel>(
+		&self,
+		witness: ValueVec,
+		mut channel: Channel,
+		shift_key_source: ShiftKeySource<'_>,
+	) -> Result<(), Error>
 	where
 		P: PackedField<Scalar = B128>
 			+ PackedExtension<B128>
@@ -219,8 +343,8 @@ impl IOPProver {
 		let SumcheckOutput {
 			challenges: eval_point,
 			eval: _,
-		} = prove_shift_reduction::<_, P, _>(
-			&self.key_collection,
+		} = prove_with_key_source::<_, P, _>(
+			&shift_key_source,
 			witness.combined_witness(),
 			bitand_claim,
 			intmul_claim,
@@ -317,6 +441,22 @@ where
 		Self::setup_with_key_collection(verifier, compression, key_collection)
 	}
 
+	/// Constructs a prover for a flat repeated circuit while materializing Shift keys only for
+	/// the base circuit.
+	pub fn setup_repeated(
+		verifier: Verifier<MerkleHash, ParallelMerkleCompress::Compression>,
+		compression: ParallelMerkleCompress,
+		repeated: RepeatedConstraintSystem,
+	) -> Result<Self, Error> {
+		let base_key_collection = build_key_collection(repeated.base());
+		Self::setup_repeated_with_key_collection(
+			verifier,
+			compression,
+			repeated,
+			base_key_collection,
+		)
+	}
+
 	/// Constructs a prover with a pre-built KeyCollection.
 	///
 	/// This allows loading a previously serialized KeyCollection to avoid
@@ -345,6 +485,36 @@ where
 		);
 
 		let iop_prover = IOPProver::new(verifier.into_iop_verifier(), key_collection);
+
+		Ok(Prover {
+			iop_prover,
+			basefold_compiler,
+		})
+	}
+
+	/// Constructs a repeated prover with a pre-built base KeyCollection.
+	pub fn setup_repeated_with_key_collection(
+		verifier: Verifier<MerkleHash, ParallelMerkleCompress::Compression>,
+		compression: ParallelMerkleCompress,
+		repeated: RepeatedConstraintSystem,
+		base_key_collection: KeyCollection,
+	) -> Result<Self, Error> {
+		// Get max subspace from verifier's IOP compiler (reuses FRI params)
+		let subspace = verifier.iop_compiler().max_subspace();
+		let domain_context = GenericPreExpanded::generate_from_subspace(subspace);
+		let log_num_shares = binius_utils::rayon::current_num_threads().ilog2() as usize;
+		let ntt = NeighborsLastMultiThread::new(domain_context, log_num_shares);
+
+		let merkle_prover = BinaryMerkleTreeProver::<_, ParallelMerkleHasher, _>::new(compression);
+
+		let basefold_compiler = BaseFoldProverCompiler::from_verifier_compiler(
+			verifier.iop_compiler(),
+			ntt,
+			merkle_prover,
+		);
+
+		let iop_prover =
+			IOPProver::new_repeated(verifier.into_iop_verifier(), repeated, base_key_collection)?;
 
 		Ok(Prover {
 			iop_prover,
@@ -382,9 +552,9 @@ where
 		witness: ValueVec,
 		transcript: &mut ProverTranscript<Challenger_>,
 	) -> Result<(), Error> {
-		let mut channel = BaseFoldProverChannel::from_compiler(&self.basefold_compiler, transcript);
-		channel.observe_many(&repeated.binding_scalars());
-		self.iop_prover.prove::<P, _>(witness, channel)
+		let channel = BaseFoldProverChannel::from_compiler(&self.basefold_compiler, transcript);
+		self.iop_prover
+			.prove_repeated::<P, _>(repeated, witness, channel)
 	}
 }
 
@@ -820,6 +990,44 @@ mod tests {
 	}
 
 	#[test]
+	fn repeated_prover_uses_base_shift_keys() {
+		let (repeated, flat_constraint_system, value_vec, verifier, flat_prover) =
+			setup_repeated_fixture(1 << 4, 1 << 5, 2);
+		let repeated_prover = Prover::<OptimalPackedB128, _, StdDigest>::setup_repeated(
+			verifier.clone(),
+			ParallelCompressionAdaptor::new(StdCompression::default()),
+			repeated.clone(),
+		)
+		.expect("repeated prover setup succeeds");
+
+		assert_eq!(
+			flat_prover.key_collection().key_ranges.len(),
+			flat_constraint_system.value_vec_layout.committed_total_len
+		);
+		assert_eq!(
+			repeated_prover.key_collection().key_ranges.len(),
+			repeated.base().value_vec_layout.committed_total_len
+		);
+		assert!(
+			repeated_prover.key_collection().key_ranges.len()
+				< flat_prover.key_collection().key_ranges.len()
+		);
+
+		let mut prover_transcript = ProverTranscript::new(StdChallenger::default());
+		repeated_prover
+			.prove_repeated(&repeated, value_vec.clone(), &mut prover_transcript)
+			.expect("compact repeated prover succeeds");
+
+		let mut verifier_transcript = prover_transcript.into_verifier();
+		verifier
+			.verify_repeated(value_vec.public(), &repeated, &mut verifier_transcript)
+			.expect("repeated verifier accepts compact-key proof");
+		verifier_transcript
+			.finalize()
+			.expect("repeated transcript is exhausted");
+	}
+
+	#[test]
 	fn repeated_verifier_rejects_wrong_log_instances() {
 		let (repeated, _, value_vec, verifier, prover) = setup_repeated_fixture(1 << 4, 1 << 5, 2);
 		let wrong_repeated =
@@ -945,6 +1153,96 @@ mod tests {
 				1usize << log_instances,
 				flat_constraint_system.and_constraints.len(),
 				flat_verify_ms / repeated_verify_ms,
+			);
+		}
+	}
+
+	#[test]
+	#[ignore = "prints flat vs repeated prover setup/key/prove runtimes"]
+	fn repeated_prover_key_materialization_print_runtimes() {
+		const LOG_INV_RATE: usize = 1;
+		let base_constraint_count = 1 << 8;
+		let base_value_count = 1 << 9;
+		let base_constraint_system =
+			make_base_constraint_system(base_constraint_count, base_value_count);
+
+		println!(
+			"Flat prover materializes Shift keys for every instance; repeated prover materializes the base keys once and applies instance offsets during Shift proving."
+		);
+		println!(
+			"Base shape: {base_constraint_count} AND rows, {} MUL row, {base_value_count} values",
+			base_constraint_system.mul_constraints.len()
+		);
+		println!(
+			"log_instances,instances,flat_key_words,repeated_key_words,flat_keys,repeated_keys,flat_setup_ms,repeated_setup_ms,flat_repeated_prove_ms,compact_repeated_prove_ms"
+		);
+
+		for log_instances in [0usize, 4, 8, 10] {
+			let repeated =
+				RepeatedConstraintSystem::new(base_constraint_system.clone(), log_instances);
+			let flat_constraint_system =
+				make_flat_repeated_constraint_system(&base_constraint_system, log_instances);
+			let value_vec = zero_value_vec(&flat_constraint_system);
+			verify_constraints(&flat_constraint_system, &value_vec)
+				.expect("zero witness satisfies the repeated toy circuit");
+
+			let verifier = Verifier::<StdDigest, _>::setup(
+				flat_constraint_system.clone(),
+				LOG_INV_RATE,
+				StdCompression::default(),
+			)
+			.expect("flat verifier setup succeeds");
+
+			let (flat_prover, flat_setup_elapsed) = elapsed_for(|| {
+				Prover::<OptimalPackedB128, _, StdDigest>::setup(
+					verifier.clone(),
+					ParallelCompressionAdaptor::new(StdCompression::default()),
+				)
+				.expect("flat prover setup succeeds")
+			});
+			let (repeated_prover, repeated_setup_elapsed) = elapsed_for(|| {
+				Prover::<OptimalPackedB128, _, StdDigest>::setup_repeated(
+					verifier.clone(),
+					ParallelCompressionAdaptor::new(StdCompression::default()),
+					repeated.clone(),
+				)
+				.expect("compact repeated prover setup succeeds")
+			});
+
+			let (_, flat_repeated_prove_elapsed) = elapsed_for(|| {
+				let mut prover_transcript = ProverTranscript::new(StdChallenger::default());
+				flat_prover
+					.prove_repeated(&repeated, value_vec.clone(), &mut prover_transcript)
+					.expect("flat-key repeated prover succeeds");
+				prover_transcript
+			});
+			let (compact_transcript, compact_repeated_prove_elapsed) = elapsed_for(|| {
+				let mut prover_transcript = ProverTranscript::new(StdChallenger::default());
+				repeated_prover
+					.prove_repeated(&repeated, value_vec.clone(), &mut prover_transcript)
+					.expect("compact repeated prover succeeds");
+				prover_transcript
+			});
+
+			let mut verifier_transcript = compact_transcript.into_verifier();
+			verifier
+				.verify_repeated(value_vec.public(), &repeated, &mut verifier_transcript)
+				.expect("repeated verifier accepts compact-key proof");
+			verifier_transcript
+				.finalize()
+				.expect("compact repeated transcript is exhausted");
+
+			println!(
+				"{log_instances},{},{},{},{},{},{:.3},{:.3},{:.3},{:.3}",
+				1usize << log_instances,
+				flat_prover.key_collection().key_ranges.len(),
+				repeated_prover.key_collection().key_ranges.len(),
+				flat_prover.key_collection().keys.len(),
+				repeated_prover.key_collection().keys.len(),
+				flat_setup_elapsed.as_secs_f64() * 1_000.0,
+				repeated_setup_elapsed.as_secs_f64() * 1_000.0,
+				flat_repeated_prove_elapsed.as_secs_f64() * 1_000.0,
+				compact_repeated_prove_elapsed.as_secs_f64() * 1_000.0,
 			);
 		}
 	}

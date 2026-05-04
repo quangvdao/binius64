@@ -12,7 +12,10 @@ use binius_math::{
 use binius_verifier::protocols::sumcheck::SumcheckOutput;
 
 use super::{
-	error::Error, key_collection::KeyCollection, phase_1::prove_phase_1, phase_2::prove_phase_2,
+	error::Error,
+	key_collection::{KeyCollection, ShiftKeySource},
+	phase_1::prove_phase_1,
+	phase_2::prove_phase_2,
 };
 
 /// Holds the prover data for an operator.
@@ -109,6 +112,23 @@ where
 	P: PackedField<Scalar = F> + WithUnderlier<Underlier: UnderlierWithBitOps>,
 	Channel: IPProverChannel<F>,
 {
+	let key_source = ShiftKeySource::flat(key_collection);
+	prove_with_key_source::<_, P, _>(&key_source, words, bitand_data, intmul_data, channel)
+}
+
+/// Proves the shift protocol reduction from an explicit key source.
+pub(crate) fn prove_with_key_source<F, P, Channel>(
+	key_source: &ShiftKeySource<'_>,
+	words: &[Word],
+	bitand_data: OperatorData<F>,
+	intmul_data: OperatorData<F>,
+	channel: &mut Channel,
+) -> Result<SumcheckOutput<F>, Error>
+where
+	F: BinaryField + From<AESTowerField8b> + WithUnderlier<Underlier: UnderlierWithBitOps>,
+	P: PackedField<Scalar = F> + WithUnderlier<Underlier: UnderlierWithBitOps>,
+	Channel: IPProverChannel<F>,
+{
 	// Sample lambdas, one for each operator.
 	let bitand_lambda = channel.sample();
 	let intmul_lambda = channel.sample();
@@ -123,7 +143,7 @@ where
 	// with challenges made of `r_j` and `r_s`,
 	// and eval equal to `gamma` (see paper).
 	let phase_1_output = prove_phase_1::<_, P, _>(
-		key_collection,
+		key_source,
 		words,
 		&prepared_bitand_data,
 		&prepared_intmul_data,
@@ -135,7 +155,7 @@ where
 	// the witness at oblong point had by univariate
 	// variable `r_j` and multilinear variable `r_y`.
 	let SumcheckOutput { challenges, eval } = prove_phase_2::<_, P, _>(
-		key_collection,
+		key_source,
 		words,
 		&prepared_bitand_data,
 		&prepared_intmul_data,

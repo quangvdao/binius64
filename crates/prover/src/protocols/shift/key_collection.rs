@@ -11,6 +11,7 @@ use binius_core::{
 };
 use binius_field::Field;
 use binius_utils::serialization::{DeserializeBytes, SerializationError, SerializeBytes};
+use binius_verifier::{RepeatedConstraintSystem, RepeatedValueLayout};
 use bytes::{Buf, BufMut};
 
 use super::{BITAND_ARITY, INTMUL_ARITY, PreparedOperatorData};
@@ -97,6 +98,18 @@ impl Key {
 		constraint_indices: &'a [ConstraintIndex],
 		operator_data: &'a PreparedOperatorData<F>,
 	) -> impl Iterator<Item = (usize, F)> + 'a {
+		self.accumulate_by_operand_with_constraint_offset(constraint_indices, operator_data, 0)
+	}
+
+	/// Accumulates operand-partitioned matrix evaluations after shifting each referenced
+	/// constraint index by a repeated-instance offset.
+	#[inline]
+	pub(crate) fn accumulate_by_operand_with_constraint_offset<'a, F: Field>(
+		&'a self,
+		constraint_indices: &'a [ConstraintIndex],
+		operator_data: &'a PreparedOperatorData<F>,
+		constraint_offset: u32,
+	) -> impl Iterator<Item = (usize, F)> + 'a {
 		let Range { start, end } = self.range;
 
 		let mut iter = constraint_indices[start as usize..end as usize].iter();
@@ -105,14 +118,16 @@ impl Key {
 		iter::from_fn(move || {
 			let current = maybe_current?;
 
-			acc += operator_data.r_x_prime_tensor.as_ref()[current.constraint_index as usize];
+			acc += operator_data.r_x_prime_tensor.as_ref()
+				[(current.constraint_index + constraint_offset) as usize];
 			for next in &mut iter {
 				maybe_current = Some(next);
 				if next.operand_index != current.operand_index {
 					let ret = mem::take(&mut acc);
 					return Some((current.operand_index as usize, ret));
 				}
-				acc += operator_data.r_x_prime_tensor.as_ref()[next.constraint_index as usize];
+				acc += operator_data.r_x_prime_tensor.as_ref()
+					[(next.constraint_index + constraint_offset) as usize];
 			}
 
 			maybe_current = None;
@@ -130,9 +145,25 @@ impl Key {
 		constraint_indices: &[ConstraintIndex],
 		operator_data: &PreparedOperatorData<F>,
 	) -> F {
-		self.accumulate_by_operand(constraint_indices, operator_data)
-			.map(|(operand_index, acc)| acc * operator_data.lambda_powers[operand_index])
-			.sum()
+		self.accumulate_with_constraint_offset(constraint_indices, operator_data, 0)
+	}
+
+	/// Accumulates the partial evaluation of an operation matrix for the key after shifting
+	/// constraint indices by a repeated-instance offset.
+	#[inline]
+	pub(crate) fn accumulate_with_constraint_offset<F: Field>(
+		&self,
+		constraint_indices: &[ConstraintIndex],
+		operator_data: &PreparedOperatorData<F>,
+		constraint_offset: u32,
+	) -> F {
+		self.accumulate_by_operand_with_constraint_offset(
+			constraint_indices,
+			operator_data,
+			constraint_offset,
+		)
+		.map(|(operand_index, acc)| acc * operator_data.lambda_powers[operand_index])
+		.sum()
 	}
 }
 
@@ -160,6 +191,106 @@ pub struct KeyCollection {
 	pub keys: Vec<Key>,
 	pub key_ranges: Vec<Range<u32>>,
 	pub constraint_indices: Vec<ConstraintIndex>,
+}
+
+/// Compact Shift-key view for repeated identical circuits.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RepeatedKeyCollection<'a> {
+	base: &'a KeyCollection,
+	log_instances: usize,
+	base_value_count: usize,
+	base_bitand_count: usize,
+	base_intmul_count: usize,
+}
+
+impl<'a> RepeatedKeyCollection<'a> {
+	pub(crate) fn new(base: &'a KeyCollection, repeated: &'a RepeatedConstraintSystem) -> Self {
+		assert_eq!(repeated.value_layout(), RepeatedValueLayout::InstanceMajor);
+		Self {
+			base,
+			log_instances: repeated.log_instances(),
+			base_value_count: repeated.base().value_vec_layout.committed_total_len,
+			base_bitand_count: repeated.base().and_constraints.len(),
+			base_intmul_count: repeated.base().mul_constraints.len(),
+		}
+	}
+
+	fn value_len(&self) -> usize {
+		self.base_value_count << self.log_instances
+	}
+
+	fn word_keys(&self, word_index: usize) -> WordKeys<'a> {
+		let instance_index = word_index / self.base_value_count;
+		let local_word_index = word_index % self.base_value_count;
+		let Range { start, end } = self.base.key_ranges[local_word_index].clone();
+		WordKeys {
+			keys: &self.base.keys[start as usize..end as usize],
+			constraint_indices: &self.base.constraint_indices,
+			bitand_constraint_offset: (instance_index * self.base_bitand_count) as u32,
+			intmul_constraint_offset: (instance_index * self.base_intmul_count) as u32,
+		}
+	}
+}
+
+/// Key materialization used by the Shift prover.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ShiftKeySource<'a> {
+	Flat(&'a KeyCollection),
+	Repeated(RepeatedKeyCollection<'a>),
+}
+
+impl<'a> ShiftKeySource<'a> {
+	pub(crate) fn flat(key_collection: &'a KeyCollection) -> Self {
+		Self::Flat(key_collection)
+	}
+
+	pub(crate) fn repeated(
+		base_key_collection: &'a KeyCollection,
+		repeated: &'a RepeatedConstraintSystem,
+	) -> Self {
+		Self::Repeated(RepeatedKeyCollection::new(base_key_collection, repeated))
+	}
+
+	pub(crate) fn value_len(&self) -> usize {
+		match self {
+			Self::Flat(key_collection) => key_collection.key_ranges.len(),
+			Self::Repeated(repeated) => repeated.value_len(),
+		}
+	}
+
+	pub(crate) fn word_keys(&self, word_index: usize) -> WordKeys<'a> {
+		match self {
+			Self::Flat(key_collection) => {
+				let Range { start, end } = key_collection.key_ranges[word_index].clone();
+				WordKeys {
+					keys: &key_collection.keys[start as usize..end as usize],
+					constraint_indices: &key_collection.constraint_indices,
+					bitand_constraint_offset: 0,
+					intmul_constraint_offset: 0,
+				}
+			}
+			Self::Repeated(repeated) => repeated.word_keys(word_index),
+		}
+	}
+}
+
+/// Keys and constraint offsets for one flat witness word.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct WordKeys<'a> {
+	pub(crate) keys: &'a [Key],
+	pub(crate) constraint_indices: &'a [ConstraintIndex],
+	pub(crate) bitand_constraint_offset: u32,
+	pub(crate) intmul_constraint_offset: u32,
+}
+
+impl WordKeys<'_> {
+	#[inline]
+	pub(crate) fn constraint_offset(&self, operation: Operation) -> u32 {
+		match operation {
+			Operation::BitwiseAnd => self.bitand_constraint_offset,
+			Operation::IntegerMul => self.intmul_constraint_offset,
+		}
+	}
 }
 
 /// A `BuilderKey` is a key that is being built up during `KeyCollection`

@@ -10,5 +10,7 @@ mod phase_2;
 mod prove;
 
 pub use error::Error;
+pub(crate) use key_collection::ShiftKeySource;
 pub use key_collection::{KeyCollection, build_key_collection};
+pub(crate) use prove::prove_with_key_source;
 pub use prove::{OperatorData, PreparedOperatorData, prove};

@@ -1,6 +1,6 @@
 // Copyright 2025 Irreducible Inc.
 
-use std::{iter, ops::Range};
+use std::iter;
 
 use binius_core::word::Word;
 use binius_field::{
@@ -22,7 +22,7 @@ use tracing::instrument;
 
 use super::{
 	error::Error,
-	key_collection::{KeyCollection, Operation},
+	key_collection::{Operation, ShiftKeySource},
 	monster::build_h_parts,
 	prove::PreparedOperatorData,
 };
@@ -38,7 +38,7 @@ const LOG_LEN: usize = LOG_WORD_SIZE_BITS + LOG_WORD_SIZE_BITS;
 /// Computes the g and h multilinears and performs the sumcheck.
 #[instrument(skip_all, name = "prover_phase_1")]
 pub fn prove_phase_1<F, P, Channel>(
-	key_collection: &KeyCollection,
+	key_source: &ShiftKeySource<'_>,
 	words: &[Word],
 	bitand_data: &PreparedOperatorData<F>,
 	intmul_data: &PreparedOperatorData<F>,
@@ -49,7 +49,7 @@ where
 	P: PackedField<Scalar = F> + WithUnderlier<Underlier: UnderlierWithBitOps>,
 	Channel: IPProverChannel<F>,
 {
-	let g_parts = build_g_parts::<_, P>(words, key_collection, bitand_data, intmul_data)?;
+	let g_parts = build_g_parts::<_, P>(words, key_source, bitand_data, intmul_data)?;
 
 	// BitAnd and IntMul share the same `r_zhat_prime`.
 	let h_parts = build_h_parts(bitand_data.r_zhat_prime);
@@ -173,10 +173,12 @@ fn build_g_parts<
 	P: PackedField<Scalar = F> + WithUnderlier<Underlier: UnderlierWithBitOps>,
 >(
 	words: &[Word],
-	key_collection: &KeyCollection,
+	key_source: &ShiftKeySource<'_>,
 	bitand_operator_data: &PreparedOperatorData<F>,
 	intmul_operator_data: &PreparedOperatorData<F>,
 ) -> Result<[FieldBuffer<P>; SHIFT_VARIANT_COUNT], Error> {
+	assert_eq!(words.len(), key_source.value_len());
+
 	let acc_size: usize = SHIFT_VARIANT_COUNT << (LOG_LEN.saturating_sub(P::LOG_WIDTH));
 
 	assert!(
@@ -204,19 +206,23 @@ fn build_g_parts<
 
 	let multilinears = words
 		.par_iter()
-		.zip(key_collection.key_ranges.par_iter())
+		.enumerate()
 		.fold(
 			|| zeroed_vec::<P>(acc_size).into_boxed_slice(),
-			|mut multilinears, (word, Range { start, end })| {
-				let keys = &key_collection.keys[*start as usize..*end as usize];
+			|mut multilinears, (word_index, word)| {
+				let word_keys = key_source.word_keys(word_index);
 
-				for key in keys {
+				for key in word_keys.keys {
 					let operator_data = match key.operation {
 						Operation::BitwiseAnd => bitand_operator_data,
 						Operation::IntegerMul => intmul_operator_data,
 					};
 
-					let acc = key.accumulate(&key_collection.constraint_indices, operator_data);
+					let acc = key.accumulate_with_constraint_offset(
+						word_keys.constraint_indices,
+						operator_data,
+						word_keys.constraint_offset(key.operation),
+					);
 					let acc_underlier = P::broadcast(acc).to_underlier();
 
 					// The following loop is an optimized version of the following

@@ -1,6 +1,6 @@
 // Copyright 2025 Irreducible Inc.
 
-use std::{iter, ops::Range};
+use std::iter;
 
 use binius_field::{AESTowerField8b, BinaryField, Field, PackedField};
 use binius_math::{
@@ -17,7 +17,7 @@ use tracing::instrument;
 use super::{
 	SHIFT_VARIANT_COUNT,
 	error::Error,
-	key_collection::{KeyCollection, Operation},
+	key_collection::{Operation, ShiftKeySource},
 	prove::PreparedOperatorData,
 };
 
@@ -135,7 +135,7 @@ where
 /// all shift-related constraints for efficient sumcheck computation.
 #[instrument(skip_all, name = "build_monster_multilinear")]
 pub fn build_monster_multilinear<F, P: PackedField<Scalar = F>>(
-	key_collection: &KeyCollection,
+	key_source: &ShiftKeySource<'_>,
 	bitand_operator_data: &PreparedOperatorData<F>,
 	intmul_operator_data: &PreparedOperatorData<F>,
 	r_j: &[F],
@@ -187,33 +187,41 @@ where
 		&intmul_h_ops,
 	);
 
-	let monster_multilinear = key_collection
-		.key_ranges
-		.par_chunks(P::WIDTH)
-		.map(|chunk| {
-			P::from_scalars(chunk.iter().map(|Range { start, end }| {
-				key_collection.keys[*start as usize..*end as usize]
+	let value_len = key_source.value_len();
+	let packed_len = value_len >> P::LOG_WIDTH;
+	let monster_multilinear = (0..packed_len)
+		.into_par_iter()
+		.map(|packed_index| {
+			let first_word_index = packed_index << P::LOG_WIDTH;
+			P::from_scalars((0..P::WIDTH).map(|lane| {
+				let word_index = first_word_index + lane;
+				let word_keys = key_source.word_keys(word_index);
+				word_keys
+					.keys
 					.iter()
 					.map(|key| {
 						let (operator_data, scalars) = match key.operation {
 							Operation::BitwiseAnd => (bitand_operator_data, &bitand_scalars),
 							Operation::IntegerMul => (intmul_operator_data, &intmul_scalars),
 						};
-						key.accumulate_by_operand(&key_collection.constraint_indices, operator_data)
-							.map(|(operand_index, acc)| {
-								let index = key.id as usize
-									+ operand_index * SHIFT_VARIANT_COUNT * WORD_SIZE_BITS;
-								acc * scalars[index]
-							})
-							.sum::<F>()
+						key.accumulate_by_operand_with_constraint_offset(
+							word_keys.constraint_indices,
+							operator_data,
+							word_keys.constraint_offset(key.operation),
+						)
+						.map(|(operand_index, acc)| {
+							let index = key.id as usize
+								+ operand_index * SHIFT_VARIANT_COUNT * WORD_SIZE_BITS;
+							acc * scalars[index]
+						})
+						.sum::<F>()
 					})
 					.sum()
 			}))
 		})
 		.collect::<Box<[_]>>();
 
-	let log_len = strict_log_2(key_collection.key_ranges.len())
-		.expect("same length as constraint system's `key_ranges`");
+	let log_len = strict_log_2(value_len).expect("same length as constraint system's `key_ranges`");
 	Ok(FieldBuffer::new(log_len, monster_multilinear))
 }
 

@@ -8,7 +8,7 @@ use binius_verifier::{config::LOG_WORD_SIZE_BITS, protocols::sumcheck::SumcheckO
 use tracing::instrument;
 
 use super::{
-	error::Error, key_collection::KeyCollection, monster::build_monster_multilinear,
+	error::Error, key_collection::ShiftKeySource, monster::build_monster_multilinear,
 	prove::PreparedOperatorData,
 };
 use crate::{
@@ -45,7 +45,7 @@ use crate::{
 /// or an error if the protocol fails.
 #[instrument(skip_all, name = "prove_phase_2")]
 pub fn prove_phase_2<F, P: PackedField<Scalar = F>, Channel>(
-	key_collection: &KeyCollection,
+	key_source: &ShiftKeySource<'_>,
 	words: &[Word],
 	bitand_data: &PreparedOperatorData<F>,
 	intmul_data: &PreparedOperatorData<F>,
@@ -70,7 +70,7 @@ where
 	let r_j_witness = fold_words::<_, P>(words, r_j_tensor.as_ref());
 
 	let monster_multilinear =
-		build_monster_multilinear(key_collection, bitand_data, intmul_data, &r_j, &r_s)?;
+		build_monster_multilinear(key_source, bitand_data, intmul_data, &r_j, &r_s)?;
 
 	run_sumcheck(r_j_witness, monster_multilinear, r_j, gamma, channel)
 }
