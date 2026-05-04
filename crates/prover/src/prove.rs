@@ -110,11 +110,10 @@ impl IOPProver {
 		let log_public_words = iop_verifier.log_public_words();
 		let log_witness_elems = iop_verifier.log_witness_elems();
 		let constraint_system = iop_verifier.into_constraint_system();
-		if !repeated.matches_flat_shape(&constraint_system) {
+		if !repeated.matches_flat_constraint_system(&constraint_system) {
 			return Err(Error::ArgumentError {
 				arg: "repeated".to_string(),
-				msg: "repeated descriptor does not match the flat constraint system shape"
-					.to_string(),
+				msg: "repeated descriptor does not match the flat constraint system".to_string(),
 			});
 		}
 		if base_key_collection.key_ranges.len()
@@ -758,8 +757,8 @@ mod tests {
 	use binius_core::{
 		ShiftVariant,
 		constraint_system::{
-			AndConstraint, ConstraintSystem, MulConstraint, Operand, ShiftedValueIndex, ValueIndex,
-			ValueVec, ValueVecLayout,
+			AndConstraint, ConstraintSystem, ShiftedValueIndex, ValueIndex, ValueVec,
+			ValueVecLayout,
 		},
 		verify::verify_constraints,
 		word::Word,
@@ -805,17 +804,6 @@ mod tests {
 			shift_variant,
 			amount,
 		}
-	}
-
-	fn offset_operand(operand: &Operand, offset: usize) -> Operand {
-		operand
-			.iter()
-			.map(|term| ShiftedValueIndex {
-				value_index: ValueIndex(term.value_index.0 + offset as u32),
-				shift_variant: term.shift_variant,
-				amount: term.amount,
-			})
-			.collect()
 	}
 
 	fn value_vec_layout(value_count: usize) -> ValueVecLayout {
@@ -866,61 +854,6 @@ mod tests {
 		constraint_system
 	}
 
-	fn repeat_and_constraints(
-		base_constraints: &[AndConstraint],
-		log_instances: usize,
-		base_value_count: usize,
-	) -> Vec<AndConstraint> {
-		let instances = 1 << log_instances;
-		let mut constraints = Vec::with_capacity(instances * base_constraints.len());
-		for instance in 0..instances {
-			let value_offset = instance * base_value_count;
-			for constraint in base_constraints {
-				constraints.push(AndConstraint {
-					a: offset_operand(&constraint.a, value_offset),
-					b: offset_operand(&constraint.b, value_offset),
-					c: offset_operand(&constraint.c, value_offset),
-				});
-			}
-		}
-		constraints
-	}
-
-	fn repeat_mul_constraints(
-		base_constraints: &[MulConstraint],
-		log_instances: usize,
-		base_value_count: usize,
-	) -> Vec<MulConstraint> {
-		let instances = 1 << log_instances;
-		let mut constraints = Vec::with_capacity(instances * base_constraints.len());
-		for instance in 0..instances {
-			let value_offset = instance * base_value_count;
-			for constraint in base_constraints {
-				constraints.push(MulConstraint {
-					a: offset_operand(&constraint.a, value_offset),
-					b: offset_operand(&constraint.b, value_offset),
-					lo: offset_operand(&constraint.lo, value_offset),
-					hi: offset_operand(&constraint.hi, value_offset),
-				});
-			}
-		}
-		constraints
-	}
-
-	fn make_flat_repeated_constraint_system(
-		base: &ConstraintSystem,
-		log_instances: usize,
-	) -> ConstraintSystem {
-		let base_value_count = base.value_vec_layout.committed_total_len;
-		let value_count = base_value_count << log_instances;
-		ConstraintSystem::new(
-			Vec::new(),
-			value_vec_layout(value_count),
-			repeat_and_constraints(&base.and_constraints, log_instances, base_value_count),
-			repeat_mul_constraints(&base.mul_constraints, log_instances, base_value_count),
-		)
-	}
-
 	fn zero_value_vec(constraint_system: &ConstraintSystem) -> ValueVec {
 		ValueVec::new_from_data(
 			constraint_system.value_vec_layout.clone(),
@@ -950,8 +883,7 @@ mod tests {
 		let base_constraint_system =
 			make_base_constraint_system(base_constraint_count, base_value_count);
 		let repeated = RepeatedConstraintSystem::new(base_constraint_system.clone(), log_instances);
-		let flat_constraint_system =
-			make_flat_repeated_constraint_system(&base_constraint_system, log_instances);
+		let flat_constraint_system = repeated.to_flat_constraint_system();
 		let value_vec = zero_value_vec(&flat_constraint_system);
 		verify_constraints(&flat_constraint_system, &value_vec)
 			.expect("zero witness satisfies the repeated toy circuit");
@@ -1028,6 +960,36 @@ mod tests {
 	}
 
 	#[test]
+	fn repeated_prover_rejects_same_shape_different_flat_circuit() {
+		const LOG_INV_RATE: usize = 1;
+		let (repeated, mut flat_constraint_system, _, _, _) =
+			setup_repeated_fixture(1 << 4, 1 << 5, 2);
+		let first_second_instance_row = repeated.base().and_constraints.len();
+		flat_constraint_system.and_constraints[first_second_instance_row]
+			.a
+			.swap(0, 1);
+
+		assert!(repeated.matches_flat_shape(&flat_constraint_system));
+		assert!(!repeated.matches_flat_constraint_system(&flat_constraint_system));
+
+		let verifier = Verifier::<StdDigest, _>::setup(
+			flat_constraint_system,
+			LOG_INV_RATE,
+			StdCompression::default(),
+		)
+		.expect("same-shape verifier setup succeeds");
+
+		assert!(
+			Prover::<OptimalPackedB128, _, StdDigest>::setup_repeated(
+				verifier,
+				ParallelCompressionAdaptor::new(StdCompression::default()),
+				repeated,
+			)
+			.is_err()
+		);
+	}
+
+	#[test]
 	fn repeated_verifier_rejects_wrong_log_instances() {
 		let (repeated, _, value_vec, verifier, prover) = setup_repeated_fixture(1 << 4, 1 << 5, 2);
 		let wrong_repeated =
@@ -1091,8 +1053,7 @@ mod tests {
 		for log_instances in [0usize, 4, 8, 10] {
 			let repeated =
 				RepeatedConstraintSystem::new(base_constraint_system.clone(), log_instances);
-			let flat_constraint_system =
-				make_flat_repeated_constraint_system(&base_constraint_system, log_instances);
+			let flat_constraint_system = repeated.to_flat_constraint_system();
 			let value_vec = zero_value_vec(&flat_constraint_system);
 			verify_constraints(&flat_constraint_system, &value_vec)
 				.expect("zero witness satisfies the repeated toy circuit");
@@ -1180,8 +1141,7 @@ mod tests {
 		for log_instances in [0usize, 4, 8, 10] {
 			let repeated =
 				RepeatedConstraintSystem::new(base_constraint_system.clone(), log_instances);
-			let flat_constraint_system =
-				make_flat_repeated_constraint_system(&base_constraint_system, log_instances);
+			let flat_constraint_system = repeated.to_flat_constraint_system();
 			let value_vec = zero_value_vec(&flat_constraint_system);
 			verify_constraints(&flat_constraint_system, &value_vec)
 				.expect("zero witness satisfies the repeated toy circuit");
