@@ -557,12 +557,14 @@ packed buffers, then the live domain halves. More logical workers increase L3/SM
 barrier traffic before they add useful arithmetic throughput.
 
 The strongest next implementation direction is therefore a larger grain of parallelism, not just a
-different per-round scheduler: prove independent Keccak batches concurrently with separate
-transcripts or independent sumcheck instances, then aggregate their claims. That exposes coarse
-work to all physical cores without forcing every worker to synchronize on every sumcheck round.
-Within one sumcheck instance, the next lower-level experiment would be a hand-pinned worker pool
-with explicit CCD partitioning and hardware-counter measurements under a lower
-`perf_event_paranoid` setting, to distinguish memory bandwidth from arithmetic-port saturation.
+different per-round scheduler. The safe target is still one Fiat-Shamir challenge per logical
+sumcheck round, but with row variables ordered as `(chunk, local_row)` so high-to-low sumcheck binds
+the local-row variables first. Chunk-local workers can then compute local round messages, aggregate
+them into one global round message, sample one challenge, and bind every chunk with that same
+challenge. Within one monolithic table layout, the next lower-level experiment would be a
+hand-pinned worker pool with explicit CCD partitioning and hardware-counter measurements under a
+lower `perf_event_paranoid` setting, to distinguish memory bandwidth from arithmetic-port
+saturation.
 
 ### Coarse-Grain Multi-Instance Experiment
 
@@ -624,6 +626,81 @@ is likely:
 
 This would increase transcript and aggregation design work, but it is now the most concrete route
 to using 16-32 hardware threads effectively.
+
+### One-Fiat-Shamir Chunked Global Experiment
+
+The independent multi-instance experiment above is a useful machine probe, but it is not the
+protocol shape we want. The safe benchmark is:
+
+```text
+KECCAK_SPARTAN_OUTER_ONE_FS_CHUNK_PERMS=<chunk size>
+KECCAK_SPARTAN_OUTER_ONE_FS_JOBS=<parallel chunk jobs>
+```
+
+with benchmark name:
+
+```text
+prove_packed_persistent_fused_one_fs_<jobs>_jobs_<chunk>_per_chunk
+```
+
+This benchmark keeps a single logical Fiat-Shamir timeline. It uses the variable order:
+
+```text
+global row index bits = [chunk bits | local-row bits]
+sumcheck order        = local-row bits first, then chunk bits
+```
+
+For each local-row round:
+
+```text
+chunk 0 local round message
+chunk 1 local round message
+...
+chunk m local round message
+        |
+        v
+weighted sum by eq(chunk; r_chunk)
+        |
+        v
+one global round message -> one challenge -> broadcast to all chunks
+```
+
+After all local-row variables are bound, the benchmark constructs a small chunk-axis
+`P * Q - C` instance from the per-chunk multilinear evaluations and proves the remaining chunk
+variables with the same single transcript structure.
+
+There is an opt-in sanity check:
+
+```text
+KECCAK_SPARTAN_OUTER_ONE_FS_VERIFY=1
+```
+
+For a small 512-permutation run split into 128-permutation chunks, this check compared the one-FS
+chunked final claim against a generic packed prover over the same permuted global table and passed.
+
+On `leopard` native at 32,768 total permutations, the safe one-FS chunked benchmark measured:
+
+| Shape | Env sketch | Median time |
+|---|---|---:|
+| One synchronized instance | `RAYON_NUM_THREADS=16 KECCAK_OUTER_WORKERS=16`, 16,384 min words/worker | 486.9 ms |
+| One-FS chunked global | 16 chunks of 2,048; 8 jobs; 2 inner workers/chunk; 2,048 min words/worker | 276.0 ms |
+
+The exact command shape was:
+
+```text
+KECCAK_SPARTAN_OUTER_SCALE_PERMS=32768
+KECCAK_SPARTAN_OUTER_ONE_FS_CHUNK_PERMS=2048
+KECCAK_SPARTAN_OUTER_ONE_FS_JOBS=8
+KECCAK_PACKED_FUSED_MIN_REDUCE_WORDS=65536
+KECCAK_PACKED_OUTER_MIN_WORDS_PER_WORKER=2048
+RAYON_NUM_THREADS=8
+KECCAK_OUTER_WORKERS=2
+```
+
+This is the result we wanted: almost the same speed as the independent multi-instance probe, but
+without giving chunks independent Fiat-Shamir challenges. The implementation is still benchmark
+infrastructure, not a finished verifier-integrated protocol path, but it strongly supports the
+chunk-local table layout with one global transcript.
 
 ## Full-Path Checkpoint
 

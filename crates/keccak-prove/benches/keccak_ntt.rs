@@ -4,6 +4,7 @@ use std::{env, hint::black_box, thread, time::Duration};
 
 use binius_core::{constraint_system::Operand, word::Word};
 use binius_field::{AESTowerField8b, Field, PackedAESBinaryField16x8b, Random};
+use binius_ip::sumcheck::RoundCoeffs;
 use binius_keccak_prove::{
 	bit_ntt::{NttLookup, upper_half_domains, upper_half_residual_evals},
 	round_message::{
@@ -25,7 +26,9 @@ use binius_keccak_prove::{
 	v0,
 };
 use binius_math::{
-	BinarySubspace, multilinear::eq::eq_ind_partial_eval, univariate::lagrange_evals_scalars,
+	BinarySubspace, FieldBuffer,
+	multilinear::eq::{eq_ind_partial_eval, eq_ind_partial_eval_scalars},
+	univariate::lagrange_evals_scalars,
 };
 use binius_prover::{
 	OptimalPackedB128, Prover,
@@ -59,6 +62,12 @@ struct SpartanOuterScaleInstance {
 	first_round_challenge: B128,
 	zerocheck_challenges: Vec<B128>,
 	sumcheck_challenges: Vec<B128>,
+	folded_claim: B128,
+}
+
+#[derive(Clone)]
+struct SpartanOuterOneFsChunkInstance {
+	packed_columns: PackedFoldedOuterColumns<OptimalPackedB128>,
 	folded_claim: B128,
 }
 
@@ -749,6 +758,288 @@ fn bench_keccak_spartan_outer_scale(c: &mut Criterion) {
 				},
 			);
 		}
+
+		if let Some(chunk_perms) = spartan_outer_one_fs_chunk_perms()
+			&& total_perms > chunk_perms
+		{
+			let one_fs =
+				spartan_outer_one_fs_chunks(total_perms, chunk_perms, first_round_challenge);
+			if spartan_outer_one_fs_verify() {
+				verify_one_fs_chunked_matches_permuted_generic(&one_fs);
+			}
+			let jobs = spartan_outer_one_fs_jobs()
+				.min(one_fs.instances.len())
+				.max(1);
+			group.throughput(Throughput::Elements(total_constraints as u64));
+			group.bench_function(
+				BenchmarkId::new(
+					format!(
+						"prove_packed_persistent_fused_one_fs_{}_jobs_{}_per_chunk",
+						jobs, chunk_perms
+					),
+					total_perms,
+				),
+				|bench| {
+					bench.iter(|| black_box(prove_one_fs_chunked_global_batch(&one_fs, jobs)));
+				},
+			);
+		}
+	}
+}
+
+struct SpartanOuterOneFsChunks {
+	instances: Vec<SpartanOuterOneFsChunkInstance>,
+	first_round_challenge: B128,
+	chunk_zerocheck_challenges: Vec<B128>,
+	local_zerocheck_challenges: Vec<B128>,
+	local_sumcheck_challenges: Vec<B128>,
+	chunk_sumcheck_challenges: Vec<B128>,
+	folded_claim: B128,
+}
+
+fn spartan_outer_one_fs_chunk_perms() -> Option<usize> {
+	env::var("KECCAK_SPARTAN_OUTER_ONE_FS_CHUNK_PERMS")
+		.ok()
+		.map(|value| {
+			value
+				.parse::<usize>()
+				.expect("KECCAK_SPARTAN_OUTER_ONE_FS_CHUNK_PERMS must be a usize")
+		})
+}
+
+fn spartan_outer_one_fs_verify() -> bool {
+	env::var("KECCAK_SPARTAN_OUTER_ONE_FS_VERIFY")
+		.ok()
+		.is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+}
+
+fn spartan_outer_one_fs_jobs() -> usize {
+	env::var("KECCAK_SPARTAN_OUTER_ONE_FS_JOBS")
+		.ok()
+		.and_then(|value| value.parse().ok())
+		.or_else(|| thread::available_parallelism().ok().map(usize::from))
+		.unwrap_or(1)
+}
+
+fn spartan_outer_one_fs_chunks(
+	total_perms: usize,
+	chunk_perms: usize,
+	first_round_challenge: B128,
+) -> SpartanOuterOneFsChunks {
+	assert_eq!(total_perms % chunk_perms, 0);
+	let chunk_count = total_perms / chunk_perms;
+	assert!(chunk_count.is_power_of_two());
+	let log_chunks = chunk_count.ilog2() as usize;
+
+	let mut rng = StdRng::seed_from_u64(43 + total_perms as u64 * 17 + chunk_perms as u64 * 31);
+	let mut instances = Vec::with_capacity(chunk_count);
+	let mut local_log_rows = None;
+	for chunk_idx in 0..chunk_count {
+		let mut round_traces = Vec::with_capacity(chunk_perms * KECCAK_ROUNDS_PER_PERM);
+		for _ in 0..chunk_perms {
+			round_traces.extend(PermutationTrace::new(rng.random::<State>()).rounds);
+		}
+		let columns = folded_outer_columns::<B128, PackedAESBinaryField16x8b>(
+			&round_traces,
+			first_round_challenge,
+		);
+		local_log_rows = Some(*local_log_rows.get_or_insert(columns.log_rows));
+		assert_eq!(columns.log_rows, local_log_rows.expect("local log rows set"));
+		let packed_columns = pack_folded_outer_columns::<B128, OptimalPackedB128>(columns.clone());
+		instances.push((chunk_idx, columns, packed_columns));
+	}
+
+	let local_log_rows = local_log_rows.expect("at least one chunk");
+	let chunk_zerocheck_challenges: Vec<_> =
+		(0..log_chunks).map(|_| B128::random(&mut rng)).collect();
+	let local_zerocheck_challenges: Vec<_> = (0..local_log_rows)
+		.map(|_| B128::random(&mut rng))
+		.collect();
+	let local_sumcheck_challenges: Vec<_> = (0..local_log_rows)
+		.map(|_| B128::random(&mut rng))
+		.collect();
+	let chunk_sumcheck_challenges: Vec<_> =
+		(0..log_chunks).map(|_| B128::random(&mut rng)).collect();
+	let chunk_eq_weights = eq_ind_partial_eval_scalars(&chunk_zerocheck_challenges);
+
+	let mut folded_claim = B128::ZERO;
+	let instances = instances
+		.into_iter()
+		.map(|(chunk_idx, columns, packed_columns)| {
+			let chunk_claim = folded_outer_claim(&columns, &local_zerocheck_challenges);
+			folded_claim += chunk_eq_weights[chunk_idx] * chunk_claim;
+			SpartanOuterOneFsChunkInstance {
+				packed_columns,
+				folded_claim: chunk_claim,
+			}
+		})
+		.collect();
+
+	SpartanOuterOneFsChunks {
+		instances,
+		first_round_challenge,
+		chunk_zerocheck_challenges,
+		local_zerocheck_challenges,
+		local_sumcheck_challenges,
+		chunk_sumcheck_challenges,
+		folded_claim,
+	}
+}
+
+fn prove_one_fs_chunked_global_batch(one_fs: &SpartanOuterOneFsChunks, jobs: usize) -> B128 {
+	let chunk_eq_weights = eq_ind_partial_eval_scalars(&one_fs.chunk_zerocheck_challenges);
+	let local_log_rows = one_fs.local_zerocheck_challenges.len();
+
+	let mut worker_outputs = thread::scope(|scope| {
+		let mut handles = Vec::new();
+		for job_idx in 1..jobs {
+			let chunk_eq_weights = &chunk_eq_weights;
+			handles.push(scope.spawn(move || {
+				prove_one_fs_chunked_global_worker(one_fs, chunk_eq_weights, jobs, job_idx)
+			}));
+		}
+
+		let mut outputs = vec![prove_one_fs_chunked_global_worker(
+			one_fs,
+			&chunk_eq_weights,
+			jobs,
+			0,
+		)];
+		for handle in handles {
+			outputs.push(handle.join().expect("one-FS chunk worker should not panic"));
+		}
+		outputs
+	});
+
+	let mut local_round_messages = vec![RoundCoeffs(vec![B128::ZERO; 3]); local_log_rows];
+	let mut chunk_p = vec![B128::ZERO; one_fs.instances.len()];
+	let mut chunk_q = vec![B128::ZERO; one_fs.instances.len()];
+	let mut chunk_c = vec![B128::ZERO; one_fs.instances.len()];
+	let mut tail_claim = B128::ZERO;
+	for output in worker_outputs.drain(..) {
+		for (acc, coeffs) in local_round_messages
+			.iter_mut()
+			.zip(output.local_round_messages)
+		{
+			*acc += &coeffs;
+		}
+		for (chunk_idx, evals, final_eval) in output.chunk_evals {
+			chunk_p[chunk_idx] = evals[0];
+			chunk_q[chunk_idx] = evals[1];
+			chunk_c[chunk_idx] = evals[2];
+			tail_claim += chunk_eq_weights[chunk_idx] * final_eval;
+		}
+	}
+
+	let chunk_columns = PackedFoldedOuterColumns {
+		p: FieldBuffer::<OptimalPackedB128>::from_values(&chunk_p),
+		q: FieldBuffer::<OptimalPackedB128>::from_values(&chunk_q),
+		c: FieldBuffer::<OptimalPackedB128>::from_values(&chunk_c),
+		log_rows: one_fs.chunk_zerocheck_challenges.len(),
+		row_count: one_fs.instances.len(),
+	};
+	let tail =
+		prove_spartan_outer_from_packed_folded_columns_with_claim::<B128, OptimalPackedB128>(
+			chunk_columns,
+			one_fs.first_round_challenge,
+			one_fs.chunk_zerocheck_challenges.clone(),
+			&one_fs.chunk_sumcheck_challenges,
+			tail_claim,
+		)
+		.unwrap();
+	black_box(one_fs.folded_claim);
+	tail.final_eval
+}
+
+fn verify_one_fs_chunked_matches_permuted_generic(one_fs: &SpartanOuterOneFsChunks) {
+	let log_chunks = one_fs.chunk_zerocheck_challenges.len();
+	let log_local = one_fs.local_zerocheck_challenges.len();
+	let chunk_count = one_fs.instances.len();
+	let local_rows = 1usize << log_local;
+	let total_rows = local_rows * chunk_count;
+	let mut p = vec![B128::ZERO; total_rows];
+	let mut q = vec![B128::ZERO; total_rows];
+	let mut c = vec![B128::ZERO; total_rows];
+
+	for (chunk_idx, instance) in one_fs.instances.iter().enumerate() {
+		for local_idx in 0..local_rows {
+			let global_idx = chunk_idx + (local_idx << log_chunks);
+			p[global_idx] = instance.packed_columns.p.get(local_idx);
+			q[global_idx] = instance.packed_columns.q.get(local_idx);
+			c[global_idx] = instance.packed_columns.c.get(local_idx);
+		}
+	}
+
+	let packed_columns = PackedFoldedOuterColumns {
+		p: FieldBuffer::<OptimalPackedB128>::from_values(&p),
+		q: FieldBuffer::<OptimalPackedB128>::from_values(&q),
+		c: FieldBuffer::<OptimalPackedB128>::from_values(&c),
+		log_rows: log_local + log_chunks,
+		row_count: total_rows,
+	};
+	let zerocheck_challenges = one_fs
+		.chunk_zerocheck_challenges
+		.iter()
+		.chain(&one_fs.local_zerocheck_challenges)
+		.copied()
+		.collect::<Vec<_>>();
+	let sumcheck_challenges = one_fs
+		.local_sumcheck_challenges
+		.iter()
+		.chain(&one_fs.chunk_sumcheck_challenges)
+		.copied()
+		.collect::<Vec<_>>();
+
+	let generic =
+		prove_spartan_outer_from_packed_folded_columns_with_claim::<B128, OptimalPackedB128>(
+			packed_columns,
+			one_fs.first_round_challenge,
+			zerocheck_challenges,
+			&sumcheck_challenges,
+			one_fs.folded_claim,
+		)
+		.unwrap();
+	let one_fs_eval = prove_one_fs_chunked_global_batch(one_fs, spartan_outer_one_fs_jobs());
+	assert_eq!(one_fs_eval, generic.final_eval);
+}
+
+struct OneFsWorkerOutput {
+	local_round_messages: Vec<RoundCoeffs<B128>>,
+	chunk_evals: Vec<(usize, [B128; 3], B128)>,
+}
+
+fn prove_one_fs_chunked_global_worker(
+	one_fs: &SpartanOuterOneFsChunks,
+	chunk_eq_weights: &[B128],
+	jobs: usize,
+	job_idx: usize,
+) -> OneFsWorkerOutput {
+	let mut local_round_messages =
+		vec![RoundCoeffs(vec![B128::ZERO; 3]); one_fs.local_zerocheck_challenges.len()];
+	let mut chunk_evals = Vec::new();
+	for chunk_idx in (job_idx..one_fs.instances.len()).step_by(jobs) {
+		let instance = &one_fs.instances[chunk_idx];
+		let proof = prove_spartan_outer_from_packed_folded_columns_with_claim_persistent_fused::<
+			B128,
+			OptimalPackedB128,
+		>(
+			instance.packed_columns.clone(),
+			one_fs.first_round_challenge,
+			one_fs.local_zerocheck_challenges.clone(),
+			&one_fs.local_sumcheck_challenges,
+			instance.folded_claim,
+		)
+		.unwrap();
+		let weight = chunk_eq_weights[chunk_idx];
+		for (acc, coeffs) in local_round_messages.iter_mut().zip(proof.round_messages) {
+			*acc += &(coeffs * weight);
+		}
+		chunk_evals.push((chunk_idx, proof.multilinear_evals, proof.final_eval));
+	}
+
+	OneFsWorkerOutput {
+		local_round_messages,
+		chunk_evals,
 	}
 }
 
