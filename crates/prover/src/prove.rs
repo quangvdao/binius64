@@ -870,15 +870,18 @@ mod tests {
 			n_scratch: 0,
 		};
 		let and_constraints = (0..base_constraint_count)
-			.map(|row| AndConstraint {
-				a: vec![ShiftedValueIndex::plain(ValueIndex(0))],
-				b: vec![test_term(2 + (row * 3 % (base_value_count - 2)), row)],
-				c: vec![ShiftedValueIndex::plain(ValueIndex(0))],
+			.map(|row| {
+				let witness = test_term(2 + (row * 3 % (base_value_count - 2)), row);
+				AndConstraint {
+					a: vec![ShiftedValueIndex::plain(ValueIndex(0))],
+					b: vec![witness],
+					c: vec![witness],
+				}
 			})
 			.collect();
 
 		let mut constraint_system =
-			ConstraintSystem::new(vec![Word::ZERO], layout, and_constraints, Vec::new());
+			ConstraintSystem::new(vec![Word::ALL_ONE], layout, and_constraints, Vec::new());
 		constraint_system
 			.validate_and_prepare()
 			.expect("constructed base constraint system with constants is valid");
@@ -997,9 +1000,25 @@ mod tests {
 			make_base_constraint_system_with_shared_constant(1 << 4, 1 << 5);
 		let repeated = RepeatedConstraintSystem::new(base_constraint_system, 2);
 		let flat_constraint_system = repeated.to_flat_constraint_system();
-		let value_vec = zero_value_vec(&flat_constraint_system);
+		let base_layout = repeated.base().value_vec_layout.clone();
+		let instances = (0..1usize << repeated.log_instances())
+			.map(|instance| {
+				ValueVec::new_from_data(
+					base_layout.clone(),
+					vec![Word::ALL_ONE, Word::from_u64(instance as u64)],
+					vec![
+						Word::from_u64(instance as u64);
+						base_layout.committed_total_len - base_layout.offset_witness
+					],
+				)
+				.expect("base instance value vec has matching layout")
+			})
+			.collect::<Vec<_>>();
+		let value_vec = repeated
+			.to_flat_value_vec(&instances)
+			.expect("instance value vecs flatten");
 		verify_constraints(&flat_constraint_system, &value_vec)
-			.expect("zero witness satisfies repeated circuit with shared constants");
+			.expect("witness satisfies repeated circuit with shared constants");
 
 		let verifier = Verifier::<StdDigest, _>::setup(
 			flat_constraint_system,

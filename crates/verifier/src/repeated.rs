@@ -4,8 +4,10 @@
 
 use binius_core::constraint_system::{
 	AndConstraint, ConstraintSystem, MulConstraint, Operand, ShiftedValueIndex, ValueIndex,
-	ValueVecLayout,
+	ValueVec, ValueVecLayout,
 };
+use binius_core::error::ConstraintSystemError;
+use binius_core::word::Word;
 use binius_utils::SerializeBytes;
 use bytes::BytesMut;
 use digest::Digest;
@@ -49,6 +51,31 @@ pub struct RepeatedConstraintSystem {
 	value_layout: RepeatedValueLayout,
 	public_binding: RepeatedPublicBinding,
 	base_circuit_digest: [u8; 32],
+}
+
+/// Error returned when flattening per-instance value vectors for a repeated descriptor.
+#[derive(Debug, thiserror::Error)]
+pub enum RepeatedValueVecError {
+	#[error("incorrect repeated instance count: expected {expected}, got {actual}")]
+	IncorrectInstanceCount { expected: usize, actual: usize },
+	#[error(
+		"instance {instance} committed value length mismatch: expected {expected}, got {actual}"
+	)]
+	InstanceValueVecLen {
+		instance: usize,
+		expected: usize,
+		actual: usize,
+	},
+	#[error("instance {instance} public value length mismatch: expected {expected}, got {actual}")]
+	InstancePublicLen {
+		instance: usize,
+		expected: usize,
+		actual: usize,
+	},
+	#[error("instance {instance} has a different shared constant at index {index}")]
+	SharedConstantMismatch { instance: usize, index: usize },
+	#[error("value-vector construction error: {0}")]
+	ValueVec(#[from] ConstraintSystemError),
 }
 
 impl RepeatedConstraintSystem {
@@ -162,6 +189,71 @@ impl RepeatedConstraintSystem {
 				base_const_count,
 			),
 		)
+	}
+
+	/// Flattens one base-layout value vector per instance into the v0 flat repeated layout.
+	///
+	/// Constants are shared and must match the first instance. All non-constant committed values
+	/// are copied into the instance-major slot used by [`Self::to_flat_constraint_system`]. The
+	/// resulting value vector exposes only the flat circuit public prefix; every later-instance
+	/// value lives in the non-public portion.
+	pub fn to_flat_value_vec(
+		&self,
+		instances: &[ValueVec],
+	) -> Result<ValueVec, RepeatedValueVecError> {
+		assert_eq!(self.value_layout, RepeatedValueLayout::InstanceMajor);
+		assert_eq!(self.public_binding, RepeatedPublicBinding::FlatPublicInputs);
+
+		let expected_instances = 1usize << self.log_instances;
+		if instances.len() != expected_instances {
+			return Err(RepeatedValueVecError::IncorrectInstanceCount {
+				expected: expected_instances,
+				actual: instances.len(),
+			});
+		}
+
+		let base_layout = &self.base.value_vec_layout;
+		let base_value_count = base_layout.committed_total_len;
+		for (instance, value_vec) in instances.iter().enumerate() {
+			if value_vec.size() != base_value_count {
+				return Err(RepeatedValueVecError::InstanceValueVecLen {
+					instance,
+					expected: base_value_count,
+					actual: value_vec.size(),
+				});
+			}
+			if value_vec.public().len() != base_layout.offset_witness {
+				return Err(RepeatedValueVecError::InstancePublicLen {
+					instance,
+					expected: base_layout.offset_witness,
+					actual: value_vec.public().len(),
+				});
+			}
+			for constant_index in 0..base_layout.n_const {
+				if value_vec.get(constant_index) != instances[0].get(constant_index) {
+					return Err(RepeatedValueVecError::SharedConstantMismatch {
+						instance,
+						index: constant_index,
+					});
+				}
+			}
+		}
+
+		let flat_layout = self.repeated_value_vec_layout();
+		let mut flat_values = vec![Word::ZERO; flat_layout.committed_total_len];
+		for (instance_index, value_vec) in instances.iter().enumerate() {
+			for local_value_index in 0..base_value_count {
+				let flat_value_index = if local_value_index < base_layout.n_const {
+					local_value_index
+				} else {
+					instance_index * base_value_count + local_value_index
+				};
+				flat_values[flat_value_index] = value_vec.get(local_value_index);
+			}
+		}
+
+		let private = flat_values.split_off(flat_layout.offset_witness);
+		ValueVec::new_from_data(flat_layout, flat_values, private).map_err(Into::into)
 	}
 
 	/// Returns whether `flat` is exactly the v0 flat expansion of this repeated descriptor.
@@ -403,7 +495,9 @@ fn digest_to_b128s(digest: [u8; 32]) -> [B128; 2] {
 #[cfg(test)]
 mod tests {
 	use binius_core::{
-		constraint_system::{AndConstraint, ConstraintSystem, MulConstraint, ValueVecLayout},
+		constraint_system::{
+			AndConstraint, ConstraintSystem, MulConstraint, ValueVec, ValueVecLayout,
+		},
 		word::Word,
 	};
 
@@ -451,6 +545,15 @@ mod tests {
 			}],
 			vec![MulConstraint::default()],
 		)
+	}
+
+	fn base_value_vec_with_constant(inout: u64, witness_0: u64, witness_1: u64) -> ValueVec {
+		ValueVec::new_from_data(
+			base_constraint_system_with_constants().value_vec_layout,
+			vec![Word::from_u64(1), Word::from_u64(inout)],
+			vec![Word::from_u64(witness_0), Word::from_u64(witness_1)],
+		)
+		.expect("base value vec has matching layout")
 	}
 
 	#[test]
@@ -501,5 +604,52 @@ mod tests {
 
 		assert!(repeated.matches_flat_shape(&flat));
 		assert!(!repeated.matches_flat_constraint_system(&flat));
+	}
+
+	#[test]
+	fn flat_value_vec_shares_constants_and_hides_later_instances() {
+		let repeated = RepeatedConstraintSystem::new(base_constraint_system_with_constants(), 2);
+		let instances = vec![
+			base_value_vec_with_constant(10, 20, 30),
+			base_value_vec_with_constant(11, 21, 31),
+			base_value_vec_with_constant(12, 22, 32),
+			base_value_vec_with_constant(13, 23, 33),
+		];
+
+		let flat = repeated
+			.to_flat_value_vec(&instances)
+			.expect("instances flatten");
+
+		assert_eq!(flat.public(), &[Word::from_u64(1), Word::from_u64(10)]);
+		assert_eq!(flat.get(0), Word::from_u64(1));
+		assert_eq!(flat.get(1), Word::from_u64(10));
+		assert_eq!(flat.get(2), Word::from_u64(20));
+		assert_eq!(flat.get(3), Word::from_u64(30));
+		assert_eq!(flat.get(4), Word::ZERO);
+		assert_eq!(flat.get(5), Word::from_u64(11));
+		assert_eq!(flat.get(6), Word::from_u64(21));
+		assert_eq!(flat.get(7), Word::from_u64(31));
+		assert_eq!(flat.get(12), Word::ZERO);
+		assert_eq!(flat.get(13), Word::from_u64(13));
+		assert_eq!(flat.get(14), Word::from_u64(23));
+		assert_eq!(flat.get(15), Word::from_u64(33));
+	}
+
+	#[test]
+	fn flat_value_vec_rejects_mismatched_shared_constants() {
+		let repeated = RepeatedConstraintSystem::new(base_constraint_system_with_constants(), 1);
+		let mut mismatched = base_value_vec_with_constant(11, 21, 31);
+		mismatched.set(0, Word::from_u64(2));
+
+		let err = repeated
+			.to_flat_value_vec(&[base_value_vec_with_constant(10, 20, 30), mismatched])
+			.expect_err("mismatched constant is rejected");
+		assert!(matches!(
+			err,
+			RepeatedValueVecError::SharedConstantMismatch {
+				instance: 1,
+				index: 0
+			}
+		));
 	}
 }
