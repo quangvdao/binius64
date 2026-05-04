@@ -180,6 +180,8 @@ pub struct RepeatedMonsterLayout {
 	pub base_constraint_count: usize,
 	/// Number of committed values in the base circuit after value-vector padding.
 	pub base_value_count: usize,
+	/// Number of shared constants at the start of the base value vector.
+	pub base_const_count: usize,
 }
 
 impl RepeatedMonsterLayout {
@@ -192,16 +194,22 @@ impl RepeatedMonsterLayout {
 		log_instances: usize,
 		base_constraint_count: usize,
 		base_value_count: usize,
+		base_const_count: usize,
 	) -> Self {
 		assert!(
 			base_constraint_count.is_power_of_two(),
 			"base constraint count must be a power of two"
 		);
 		assert!(base_value_count.is_power_of_two(), "base value count must be a power of two");
+		assert!(
+			base_const_count <= base_value_count,
+			"base constant count must not exceed base value count"
+		);
 		Self {
 			log_instances,
 			base_constraint_count,
 			base_value_count,
+			base_const_count,
 		}
 	}
 
@@ -222,13 +230,20 @@ impl RepeatedMonsterLayout {
 ///
 /// ```text
 /// flat_constraint = instance * base_constraint_count + local_constraint
-/// flat_value      = instance * base_value_count      + local_value
+/// flat_value      = local_value                                  if local_value is a constant
+/// flat_value      = instance * base_value_count + local_value    otherwise
 /// ```
 ///
 /// The instance axis collapses via:
 ///
 /// ```text
 /// sum_u eq(r_x_instance, u) * eq(r_y_instance, u) = eq(r_x_instance, r_y_instance)
+/// ```
+///
+/// Shared constants instead contribute on the flat value point for instance zero:
+///
+/// ```text
+/// sum_u eq(r_x_instance, u) * eq(r_y_instance, 0) = eq(r_y_instance, 0)
 /// ```
 pub fn evaluate_repeated_monster_multilinear_for_operation<F, E, const ARITY: usize>(
 	base_operand_vecs: &[Vec<&Operand>],
@@ -262,20 +277,31 @@ where
 	let r_x_local_tensor = eq_ind_partial_eval_scalars(r_x_local);
 	let r_y_local_tensor = eq_ind_partial_eval_scalars(r_y_local);
 	let instance_factor = eq_ind(r_x_instance, r_y_instance);
+	let zero_instance = vec![E::zero(); layout.log_instances];
+	let shared_constant_factor = eq_ind(r_y_instance, &zero_instance);
 
 	let l_tilde = lagrange_evals_scalars(subspace, operator_data.r_zhat_prime.clone());
 	let h_op_evals = evaluate_h_op(&l_tilde, r_j, r_s);
 
 	let lambda_powers = powers(lambda).skip(1).take(ARITY).collect::<Vec<_>>();
-	let evals =
-		evaluate_matrices(base_operand_vecs, &lambda_powers, &r_x_local_tensor, &r_y_local_tensor);
+	let [non_constant_evals, shared_constant_evals] = evaluate_matrices_split_constants(
+		base_operand_vecs,
+		&lambda_powers,
+		&r_x_local_tensor,
+		&r_y_local_tensor,
+		layout.base_const_count,
+	);
 
-	let eval = inner_product_scalars(
-		evals.map(|mut evals_op| evaluate_inplace_scalars(&mut evals_op[..], r_s)),
+	let non_constant_eval = inner_product_scalars(
+		non_constant_evals.map(|mut evals_op| evaluate_inplace_scalars(&mut evals_op[..], r_s)),
+		h_op_evals.clone(),
+	);
+	let shared_constant_eval = inner_product_scalars(
+		shared_constant_evals.map(|mut evals_op| evaluate_inplace_scalars(&mut evals_op[..], r_s)),
 		h_op_evals,
 	);
 
-	Ok(instance_factor * eval)
+	Ok(instance_factor * non_constant_eval + shared_constant_factor * shared_constant_eval)
 }
 
 /// Calculate a batched sum of the M_{\text{op}}(r'_x, r_y, s) matrices.
@@ -348,6 +374,73 @@ fn evaluate_matrices<F: BinaryField, E: FieldOps<Scalar = F> + From<F>>(
 		})
 }
 
+fn evaluate_matrices_split_constants<F: BinaryField, E: FieldOps<Scalar = F> + From<F>>(
+	operands: &[Vec<&Operand>],
+	operand_coeffs: &[E],
+	r_x_prime_tensor: &[E],
+	r_y_tensor: &[E],
+	base_const_count: usize,
+) -> [[[E; WORD_SIZE_BITS]; SHIFT_VARIANT_COUNT]; 2] {
+	assert_eq!(operands.len(), operand_coeffs.len());
+
+	let zero_evals = array::from_fn(|_| array::from_fn::<E, WORD_SIZE_BITS, _>(|_| E::zero()));
+
+	iter::zip(operand_coeffs, operands)
+		.map(|(coeff, constraint_operands)| {
+			let mut non_constant_evals: [[E; WORD_SIZE_BITS]; SHIFT_VARIANT_COUNT] =
+				array::from_fn(|_| array::from_fn::<E, WORD_SIZE_BITS, _>(|_| E::zero()));
+			let mut shared_constant_evals: [[E; WORD_SIZE_BITS]; SHIFT_VARIANT_COUNT] =
+				array::from_fn(|_| array::from_fn::<E, WORD_SIZE_BITS, _>(|_| E::zero()));
+			for (operand_terms, constraint_eval) in iter::zip(constraint_operands, r_x_prime_tensor)
+			{
+				for ShiftedValueIndex {
+					value_index,
+					shift_variant,
+					amount,
+				} in *operand_terms
+				{
+					let shift_id = match shift_variant {
+						ShiftVariant::Sll => 0,
+						ShiftVariant::Slr => 1,
+						ShiftVariant::Sar => 2,
+						ShiftVariant::Rotr => 3,
+						ShiftVariant::Sll32 => 4,
+						ShiftVariant::Srl32 => 5,
+						ShiftVariant::Sra32 => 6,
+						ShiftVariant::Rotr32 => 7,
+					};
+					let evals = if value_index.0 < base_const_count as u32 {
+						&mut shared_constant_evals
+					} else {
+						&mut non_constant_evals
+					};
+					evals[shift_id][*amount] +=
+						constraint_eval.clone() * &r_y_tensor[value_index.0 as usize];
+				}
+			}
+
+			for evals in [&mut non_constant_evals, &mut shared_constant_evals] {
+				for evals_op in evals {
+					for evals_op_s in &mut *evals_op {
+						*evals_op_s *= coeff;
+					}
+				}
+			}
+
+			[non_constant_evals, shared_constant_evals]
+		})
+		.fold([zero_evals.clone(), zero_evals], |mut a, b| {
+			for (a_kind, b_kind) in iter::zip(&mut a, b) {
+				for (a_op, b_op) in iter::zip(a_kind, b_kind) {
+					for (a_op_s, b_op_s) in iter::zip(&mut *a_op, b_op) {
+						*a_op_s += b_op_s;
+					}
+				}
+			}
+			a
+		})
+}
+
 #[cfg(test)]
 mod tests {
 	use std::{
@@ -403,6 +496,28 @@ mod tests {
 			.collect()
 	}
 
+	fn offset_operand_with_shared_constants(
+		operand: &Operand,
+		offset: usize,
+		base_const_count: usize,
+	) -> Operand {
+		operand
+			.iter()
+			.map(|term| {
+				let value_index = if term.value_index.0 < base_const_count as u32 {
+					term.value_index
+				} else {
+					ValueIndex(term.value_index.0 + offset as u32)
+				};
+				ShiftedValueIndex {
+					value_index,
+					shift_variant: term.shift_variant,
+					amount: term.amount,
+				}
+			})
+			.collect()
+	}
+
 	fn make_base_and_constraints(
 		base_constraint_count: usize,
 		base_value_count: usize,
@@ -439,6 +554,39 @@ mod tests {
 					a: offset_operand(&constraint.a, value_offset),
 					b: offset_operand(&constraint.b, value_offset),
 					c: offset_operand(&constraint.c, value_offset),
+				});
+			}
+		}
+		constraints
+	}
+
+	fn repeat_and_constraints_with_shared_constants(
+		base_constraints: &[AndConstraint],
+		log_instances: usize,
+		base_value_count: usize,
+		base_const_count: usize,
+	) -> Vec<AndConstraint> {
+		let instances = 1 << log_instances;
+		let mut constraints = Vec::with_capacity(instances * base_constraints.len());
+		for instance in 0..instances {
+			let value_offset = instance * base_value_count;
+			for constraint in base_constraints {
+				constraints.push(AndConstraint {
+					a: offset_operand_with_shared_constants(
+						&constraint.a,
+						value_offset,
+						base_const_count,
+					),
+					b: offset_operand_with_shared_constants(
+						&constraint.b,
+						value_offset,
+						base_const_count,
+					),
+					c: offset_operand_with_shared_constants(
+						&constraint.c,
+						value_offset,
+						base_const_count,
+					),
 				});
 			}
 		}
@@ -544,7 +692,81 @@ mod tests {
 			&r_j,
 			&r_s,
 			&r_y,
-			RepeatedMonsterLayout::new(log_instances, base_constraint_count, base_value_count),
+			RepeatedMonsterLayout::new(log_instances, base_constraint_count, base_value_count, 0),
+		)
+		.unwrap();
+
+		assert_eq!(repeated, flat);
+	}
+
+	#[test]
+	fn repeated_monster_eval_matches_flat_shared_constants() {
+		type F = BinaryField128bGhash;
+
+		let mut rng = StdRng::seed_from_u64(11);
+		let base_constraint_count = 1 << 5;
+		let base_value_count = 1 << 6;
+		let base_const_count = 4;
+		let log_instances = 5;
+
+		let base_constraints = (0..base_constraint_count)
+			.map(|row| AndConstraint {
+				a: vec![test_term(row % base_const_count, row)],
+				b: vec![test_term(base_const_count + (row * 3 % 16), row + 1)],
+				c: vec![test_term(base_const_count + (row * 5 % 16), row + 2)],
+			})
+			.collect::<Vec<_>>();
+		let flat_constraints = repeat_and_constraints_with_shared_constants(
+			&base_constraints,
+			log_instances,
+			base_value_count,
+			base_const_count,
+		);
+
+		let operator_data: OperatorData<F, BITAND_ARITY> = OperatorData::new(
+			F::random(&mut rng),
+			random_scalars(&mut rng, base_constraint_count.ilog2() as usize + log_instances),
+			array::from_fn(|_| F::random(&mut rng)),
+		);
+		let subspace = BinarySubspace::<F>::with_dim(LOG_WORD_SIZE_BITS);
+		let lambda = F::random(&mut rng);
+		let r_j = random_scalars(&mut rng, LOG_WORD_SIZE_BITS);
+		let r_s = random_scalars(&mut rng, LOG_WORD_SIZE_BITS);
+		let r_y = random_scalars(&mut rng, base_value_count.ilog2() as usize + log_instances);
+
+		let (base_a, base_b, base_c) = base_constraints
+			.iter()
+			.map(|AndConstraint { a, b, c }| (a, b, c))
+			.multiunzip();
+		let (flat_a, flat_b, flat_c) = flat_constraints
+			.iter()
+			.map(|AndConstraint { a, b, c }| (a, b, c))
+			.multiunzip();
+
+		let flat = evaluate_monster_multilinear_for_operation(
+			&[flat_a, flat_b, flat_c],
+			&operator_data,
+			&subspace,
+			lambda,
+			&r_j,
+			&r_s,
+			&r_y,
+		)
+		.unwrap();
+		let repeated = evaluate_repeated_monster_multilinear_for_operation(
+			&[base_a, base_b, base_c],
+			&operator_data,
+			&subspace,
+			lambda,
+			&r_j,
+			&r_s,
+			&r_y,
+			RepeatedMonsterLayout::new(
+				log_instances,
+				base_constraint_count,
+				base_value_count,
+				base_const_count,
+			),
 		)
 		.unwrap();
 
@@ -603,7 +825,7 @@ mod tests {
 			&r_j,
 			&r_s,
 			&r_y,
-			RepeatedMonsterLayout::new(log_instances, base_constraint_count, base_value_count),
+			RepeatedMonsterLayout::new(log_instances, base_constraint_count, base_value_count, 0),
 		)
 		.unwrap();
 
@@ -659,8 +881,12 @@ mod tests {
 			)
 			.unwrap();
 
-			let repeated_layout =
-				RepeatedMonsterLayout::new(log_instances, base_constraint_count, base_value_count);
+			let repeated_layout = RepeatedMonsterLayout::new(
+				log_instances,
+				base_constraint_count,
+				base_value_count,
+				0,
+			);
 			let repeated = evaluate_repeated_monster_multilinear_for_operation(
 				&base_operands,
 				&operator_data,

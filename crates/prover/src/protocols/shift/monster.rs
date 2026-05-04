@@ -204,17 +204,15 @@ where
 							Operation::BitwiseAnd => (bitand_operator_data, &bitand_scalars),
 							Operation::IntegerMul => (intmul_operator_data, &intmul_scalars),
 						};
-						key.accumulate_by_operand_with_constraint_offset(
-							word_keys.constraint_indices,
-							operator_data,
-							word_keys.constraint_offset(key.operation),
-						)
-						.map(|(operand_index, acc)| {
-							let index = key.id as usize
-								+ operand_index * SHIFT_VARIANT_COUNT * WORD_SIZE_BITS;
-							acc * scalars[index]
-						})
-						.sum::<F>()
+						word_keys
+							.accumulate_by_operand(key, operator_data)
+							.into_iter()
+							.map(|(operand_index, acc)| {
+								let index = key.id as usize
+									+ operand_index * SHIFT_VARIANT_COUNT * WORD_SIZE_BITS;
+								acc * scalars[index]
+							})
+							.sum::<F>()
 					})
 					.sum()
 			}))

@@ -199,6 +199,7 @@ pub(crate) struct RepeatedKeyCollection<'a> {
 	base: &'a KeyCollection,
 	log_instances: usize,
 	base_value_count: usize,
+	base_const_count: usize,
 	base_bitand_count: usize,
 	base_intmul_count: usize,
 }
@@ -210,6 +211,7 @@ impl<'a> RepeatedKeyCollection<'a> {
 			base,
 			log_instances: repeated.log_instances(),
 			base_value_count: repeated.base().value_vec_layout.committed_total_len,
+			base_const_count: repeated.base().value_vec_layout.n_const,
 			base_bitand_count: repeated.base().and_constraints.len(),
 			base_intmul_count: repeated.base().mul_constraints.len(),
 		}
@@ -222,12 +224,25 @@ impl<'a> RepeatedKeyCollection<'a> {
 	fn word_keys(&self, word_index: usize) -> WordKeys<'a> {
 		let instance_index = word_index / self.base_value_count;
 		let local_word_index = word_index % self.base_value_count;
+		if local_word_index < self.base_const_count && instance_index != 0 {
+			return WordKeys::empty(&self.base.constraint_indices);
+		}
 		let Range { start, end } = self.base.key_ranges[local_word_index].clone();
 		WordKeys {
 			keys: &self.base.keys[start as usize..end as usize],
 			constraint_indices: &self.base.constraint_indices,
-			bitand_constraint_offset: (instance_index * self.base_bitand_count) as u32,
-			intmul_constraint_offset: (instance_index * self.base_intmul_count) as u32,
+			constraint_offsets: if local_word_index < self.base_const_count {
+				ConstraintOffsets::AllInstances {
+					log_instances: self.log_instances,
+					base_bitand_count: self.base_bitand_count,
+					base_intmul_count: self.base_intmul_count,
+				}
+			} else {
+				ConstraintOffsets::Single {
+					bitand: (instance_index * self.base_bitand_count) as u32,
+					intmul: (instance_index * self.base_intmul_count) as u32,
+				}
+			},
 		}
 	}
 }
@@ -265,8 +280,10 @@ impl<'a> ShiftKeySource<'a> {
 				WordKeys {
 					keys: &key_collection.keys[start as usize..end as usize],
 					constraint_indices: &key_collection.constraint_indices,
-					bitand_constraint_offset: 0,
-					intmul_constraint_offset: 0,
+					constraint_offsets: ConstraintOffsets::Single {
+						bitand: 0,
+						intmul: 0,
+					},
 				}
 			}
 			Self::Repeated(repeated) => repeated.word_keys(word_index),
@@ -279,16 +296,113 @@ impl<'a> ShiftKeySource<'a> {
 pub(crate) struct WordKeys<'a> {
 	pub(crate) keys: &'a [Key],
 	pub(crate) constraint_indices: &'a [ConstraintIndex],
-	pub(crate) bitand_constraint_offset: u32,
-	pub(crate) intmul_constraint_offset: u32,
+	constraint_offsets: ConstraintOffsets,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ConstraintOffsets {
+	Single {
+		bitand: u32,
+		intmul: u32,
+	},
+	AllInstances {
+		log_instances: usize,
+		base_bitand_count: usize,
+		base_intmul_count: usize,
+	},
 }
 
 impl WordKeys<'_> {
+	fn empty<'a>(constraint_indices: &'a [ConstraintIndex]) -> WordKeys<'a> {
+		WordKeys {
+			keys: &[],
+			constraint_indices,
+			constraint_offsets: ConstraintOffsets::Single {
+				bitand: 0,
+				intmul: 0,
+			},
+		}
+	}
+
 	#[inline]
-	pub(crate) fn constraint_offset(&self, operation: Operation) -> u32 {
-		match operation {
-			Operation::BitwiseAnd => self.bitand_constraint_offset,
-			Operation::IntegerMul => self.intmul_constraint_offset,
+	pub(crate) fn accumulate<F: Field>(
+		&self,
+		key: &Key,
+		operator_data: &PreparedOperatorData<F>,
+	) -> F {
+		match self.constraint_offsets {
+			ConstraintOffsets::Single { bitand, intmul } => {
+				let offset = match key.operation {
+					Operation::BitwiseAnd => bitand,
+					Operation::IntegerMul => intmul,
+				};
+				key.accumulate_with_constraint_offset(
+					self.constraint_indices,
+					operator_data,
+					offset,
+				)
+			}
+			ConstraintOffsets::AllInstances {
+				log_instances,
+				base_bitand_count,
+				base_intmul_count,
+			} => {
+				let base_constraint_count = match key.operation {
+					Operation::BitwiseAnd => base_bitand_count,
+					Operation::IntegerMul => base_intmul_count,
+				};
+				(0..1usize << log_instances)
+					.map(|instance_index| {
+						key.accumulate_with_constraint_offset(
+							self.constraint_indices,
+							operator_data,
+							(instance_index * base_constraint_count) as u32,
+						)
+					})
+					.sum()
+			}
+		}
+	}
+
+	pub(crate) fn accumulate_by_operand<F: Field>(
+		&self,
+		key: &Key,
+		operator_data: &PreparedOperatorData<F>,
+	) -> Vec<(usize, F)> {
+		match self.constraint_offsets {
+			ConstraintOffsets::Single { bitand, intmul } => {
+				let offset = match key.operation {
+					Operation::BitwiseAnd => bitand,
+					Operation::IntegerMul => intmul,
+				};
+				key.accumulate_by_operand_with_constraint_offset(
+					self.constraint_indices,
+					operator_data,
+					offset,
+				)
+				.collect()
+			}
+			ConstraintOffsets::AllInstances {
+				log_instances,
+				base_bitand_count,
+				base_intmul_count,
+			} => {
+				let base_constraint_count = match key.operation {
+					Operation::BitwiseAnd => base_bitand_count,
+					Operation::IntegerMul => base_intmul_count,
+				};
+				let mut accumulations = vec![F::ZERO; operator_data.lambda_powers.len()];
+				for instance_index in 0..1usize << log_instances {
+					for (operand_index, acc) in key.accumulate_by_operand_with_constraint_offset(
+						self.constraint_indices,
+						operator_data,
+						(instance_index * base_constraint_count) as u32,
+					) {
+						accumulations[operand_index] += acc;
+					}
+				}
+				accumulations.into_iter().enumerate().collect()
+			}
 		}
 	}
 }

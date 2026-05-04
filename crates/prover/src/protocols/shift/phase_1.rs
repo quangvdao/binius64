@@ -218,11 +218,7 @@ fn build_g_parts<
 						Operation::IntegerMul => intmul_operator_data,
 					};
 
-					let acc = key.accumulate_with_constraint_offset(
-						word_keys.constraint_indices,
-						operator_data,
-						word_keys.constraint_offset(key.operation),
-					);
+					let acc = word_keys.accumulate(key, operator_data);
 					let acc_underlier = P::broadcast(acc).to_underlier();
 
 					// The following loop is an optimized version of the following

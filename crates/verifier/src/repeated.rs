@@ -22,8 +22,15 @@ pub enum RepeatedValueLayout {
 	/// Instance-major tensor layout:
 	///
 	/// ```text
-	/// flat_value = instance * base_value_count + local_value
+	/// flat_value = local_value                                  if local_value is a constant
+	/// flat_value = instance * base_value_count + local_value    otherwise
 	/// ```
+	///
+	/// Base constants are shared across every repeated instance. All non-constant committed
+	/// values, including per-instance public inputs in the base circuit, are repeated
+	/// instance-major. With [`RepeatedPublicBinding::FlatPublicInputs`], only the first
+	/// instance's public prefix remains public in the flat circuit; later instance values are
+	/// hidden witness words.
 	InstanceMajor = 0,
 }
 
@@ -129,20 +136,16 @@ impl RepeatedConstraintSystem {
 
 	/// Expands the repeated descriptor into the flat constraint system represented by v0.
 	///
-	/// The v0 instance-major layout repeats committed value indices by adding
+	/// The v0 instance-major layout shares base constants across every repeated instance and
+	/// repeats all non-constant committed value indices by adding
 	/// `instance * base_value_count` to every term. It keeps only the base public prefix public in
-	/// the flat circuit, so values in later instances are hidden witness data. Base constants are
-	/// therefore not supported by this layout: offsetting a constant for later instances would
-	/// turn it into unconstrained private data.
+	/// the flat circuit, so values in later instances are hidden witness data.
 	pub fn to_flat_constraint_system(&self) -> ConstraintSystem {
 		assert_eq!(self.value_layout, RepeatedValueLayout::InstanceMajor);
 		assert_eq!(self.public_binding, RepeatedPublicBinding::FlatPublicInputs);
-		assert!(
-			self.base.constants.is_empty(),
-			"v0 repeated expansion requires circuits with no base constants"
-		);
 
 		let base_value_count = self.base.value_vec_layout.committed_total_len;
+		let base_const_count = self.base.value_vec_layout.n_const;
 		ConstraintSystem::new(
 			self.base.constants.clone(),
 			self.repeated_value_vec_layout(),
@@ -150,11 +153,13 @@ impl RepeatedConstraintSystem {
 				&self.base.and_constraints,
 				self.log_instances,
 				base_value_count,
+				base_const_count,
 			),
 			repeat_mul_constraints(
 				&self.base.mul_constraints,
 				self.log_instances,
 				base_value_count,
+				base_const_count,
 			),
 		)
 	}
@@ -167,7 +172,6 @@ impl RepeatedConstraintSystem {
 	pub fn matches_flat_constraint_system(&self, flat: &ConstraintSystem) -> bool {
 		if self.value_layout != RepeatedValueLayout::InstanceMajor
 			|| self.public_binding != RepeatedPublicBinding::FlatPublicInputs
-			|| !self.base.constants.is_empty()
 			|| !self.matches_flat_shape(flat)
 			|| flat.constants != self.base.constants
 			|| flat.value_vec_layout != self.repeated_value_vec_layout()
@@ -176,16 +180,19 @@ impl RepeatedConstraintSystem {
 		}
 
 		let base_value_count = self.base.value_vec_layout.committed_total_len;
+		let base_const_count = self.base.value_vec_layout.n_const;
 		repeated_and_constraints_match(
 			&self.base.and_constraints,
 			&flat.and_constraints,
 			self.log_instances,
 			base_value_count,
+			base_const_count,
 		) && repeated_mul_constraints_match(
 			&self.base.mul_constraints,
 			&flat.mul_constraints,
 			self.log_instances,
 			base_value_count,
+			base_const_count,
 		)
 	}
 
@@ -209,6 +216,7 @@ fn repeat_and_constraints(
 	base_constraints: &[AndConstraint],
 	log_instances: usize,
 	base_value_count: usize,
+	base_const_count: usize,
 ) -> Vec<AndConstraint> {
 	let instances = 1 << log_instances;
 	let mut constraints = Vec::with_capacity(instances * base_constraints.len());
@@ -216,9 +224,9 @@ fn repeat_and_constraints(
 		let value_offset = instance * base_value_count;
 		for constraint in base_constraints {
 			constraints.push(AndConstraint {
-				a: offset_operand(&constraint.a, value_offset),
-				b: offset_operand(&constraint.b, value_offset),
-				c: offset_operand(&constraint.c, value_offset),
+				a: offset_operand(&constraint.a, value_offset, base_const_count),
+				b: offset_operand(&constraint.b, value_offset, base_const_count),
+				c: offset_operand(&constraint.c, value_offset, base_const_count),
 			});
 		}
 	}
@@ -229,6 +237,7 @@ fn repeat_mul_constraints(
 	base_constraints: &[MulConstraint],
 	log_instances: usize,
 	base_value_count: usize,
+	base_const_count: usize,
 ) -> Vec<MulConstraint> {
 	let instances = 1 << log_instances;
 	let mut constraints = Vec::with_capacity(instances * base_constraints.len());
@@ -236,10 +245,10 @@ fn repeat_mul_constraints(
 		let value_offset = instance * base_value_count;
 		for constraint in base_constraints {
 			constraints.push(MulConstraint {
-				a: offset_operand(&constraint.a, value_offset),
-				b: offset_operand(&constraint.b, value_offset),
-				lo: offset_operand(&constraint.lo, value_offset),
-				hi: offset_operand(&constraint.hi, value_offset),
+				a: offset_operand(&constraint.a, value_offset, base_const_count),
+				b: offset_operand(&constraint.b, value_offset, base_const_count),
+				lo: offset_operand(&constraint.lo, value_offset, base_const_count),
+				hi: offset_operand(&constraint.hi, value_offset, base_const_count),
 			});
 		}
 	}
@@ -251,6 +260,7 @@ fn repeated_and_constraints_match(
 	flat_constraints: &[AndConstraint],
 	log_instances: usize,
 	base_value_count: usize,
+	base_const_count: usize,
 ) -> bool {
 	let base_constraint_count = base_constraints.len();
 	let instances = 1 << log_instances;
@@ -261,10 +271,22 @@ fn repeated_and_constraints_match(
 		let value_offset = instance * base_value_count;
 		for (base_index, base_constraint) in base_constraints.iter().enumerate() {
 			let flat_constraint = &flat_constraints[instance * base_constraint_count + base_index];
-			if !offset_operand_matches(&base_constraint.a, &flat_constraint.a, value_offset)
-				|| !offset_operand_matches(&base_constraint.b, &flat_constraint.b, value_offset)
-				|| !offset_operand_matches(&base_constraint.c, &flat_constraint.c, value_offset)
-			{
+			if !offset_operand_matches(
+				&base_constraint.a,
+				&flat_constraint.a,
+				value_offset,
+				base_const_count,
+			) || !offset_operand_matches(
+				&base_constraint.b,
+				&flat_constraint.b,
+				value_offset,
+				base_const_count,
+			) || !offset_operand_matches(
+				&base_constraint.c,
+				&flat_constraint.c,
+				value_offset,
+				base_const_count,
+			) {
 				return false;
 			}
 		}
@@ -277,6 +299,7 @@ fn repeated_mul_constraints_match(
 	flat_constraints: &[MulConstraint],
 	log_instances: usize,
 	base_value_count: usize,
+	base_const_count: usize,
 ) -> bool {
 	let base_constraint_count = base_constraints.len();
 	let instances = 1 << log_instances;
@@ -287,11 +310,27 @@ fn repeated_mul_constraints_match(
 		let value_offset = instance * base_value_count;
 		for (base_index, base_constraint) in base_constraints.iter().enumerate() {
 			let flat_constraint = &flat_constraints[instance * base_constraint_count + base_index];
-			if !offset_operand_matches(&base_constraint.a, &flat_constraint.a, value_offset)
-				|| !offset_operand_matches(&base_constraint.b, &flat_constraint.b, value_offset)
-				|| !offset_operand_matches(&base_constraint.lo, &flat_constraint.lo, value_offset)
-				|| !offset_operand_matches(&base_constraint.hi, &flat_constraint.hi, value_offset)
-			{
+			if !offset_operand_matches(
+				&base_constraint.a,
+				&flat_constraint.a,
+				value_offset,
+				base_const_count,
+			) || !offset_operand_matches(
+				&base_constraint.b,
+				&flat_constraint.b,
+				value_offset,
+				base_const_count,
+			) || !offset_operand_matches(
+				&base_constraint.lo,
+				&flat_constraint.lo,
+				value_offset,
+				base_const_count,
+			) || !offset_operand_matches(
+				&base_constraint.hi,
+				&flat_constraint.hi,
+				value_offset,
+				base_const_count,
+			) {
 				return false;
 			}
 		}
@@ -299,26 +338,40 @@ fn repeated_mul_constraints_match(
 	true
 }
 
-fn offset_operand(operand: &Operand, offset: usize) -> Operand {
+fn offset_operand(operand: &Operand, offset: usize, base_const_count: usize) -> Operand {
 	operand
 		.iter()
-		.map(|term| offset_term(term, offset))
+		.map(|term| offset_term(term, offset, base_const_count))
 		.collect()
 }
 
-fn offset_operand_matches(base: &Operand, flat: &Operand, offset: usize) -> bool {
+fn offset_operand_matches(
+	base: &Operand,
+	flat: &Operand,
+	offset: usize,
+	base_const_count: usize,
+) -> bool {
 	base.len() == flat.len()
 		&& std::iter::zip(base, flat).all(|(base_term, flat_term)| {
-			let expected = offset_term(base_term, offset);
+			let expected = offset_term(base_term, offset, base_const_count);
 			expected.value_index == flat_term.value_index
 				&& expected.shift_variant == flat_term.shift_variant
 				&& expected.amount == flat_term.amount
 		})
 }
 
-fn offset_term(term: &ShiftedValueIndex, offset: usize) -> ShiftedValueIndex {
+fn offset_term(
+	term: &ShiftedValueIndex,
+	offset: usize,
+	base_const_count: usize,
+) -> ShiftedValueIndex {
+	let value_index = if term.value_index.0 < base_const_count as u32 {
+		term.value_index
+	} else {
+		ValueIndex(term.value_index.0 + offset as u32)
+	};
 	ShiftedValueIndex {
-		value_index: ValueIndex(term.value_index.0 + offset as u32),
+		value_index,
 		shift_variant: term.shift_variant,
 		amount: term.amount,
 	}
@@ -378,6 +431,28 @@ mod tests {
 		)
 	}
 
+	fn base_constraint_system_with_constants() -> ConstraintSystem {
+		ConstraintSystem::new(
+			vec![Word::from_u64(1)],
+			ValueVecLayout {
+				n_const: 1,
+				n_inout: 1,
+				n_witness: 2,
+				n_internal: 0,
+				offset_inout: 1,
+				offset_witness: 2,
+				committed_total_len: 4,
+				n_scratch: 0,
+			},
+			vec![AndConstraint {
+				a: vec![ShiftedValueIndex::plain(ValueIndex(0))],
+				b: vec![ShiftedValueIndex::plain(ValueIndex(2))],
+				c: vec![ShiftedValueIndex::plain(ValueIndex(3))],
+			}],
+			vec![MulConstraint::default()],
+		)
+	}
+
 	#[test]
 	fn flat_expansion_matches_repeated_descriptor() {
 		let repeated = RepeatedConstraintSystem::new(base_constraint_system(), 2);
@@ -389,6 +464,21 @@ mod tests {
 		assert_eq!(flat.value_vec_layout.offset_witness, 2);
 		assert_eq!(flat.and_constraints.len(), 4);
 		assert_eq!(flat.mul_constraints.len(), 4);
+	}
+
+	#[test]
+	fn flat_expansion_shares_base_constants() {
+		let repeated = RepeatedConstraintSystem::new(base_constraint_system_with_constants(), 2);
+		let flat = repeated.to_flat_constraint_system();
+
+		assert!(repeated.matches_flat_shape(&flat));
+		assert!(repeated.matches_flat_constraint_system(&flat));
+		assert_eq!(flat.constants, vec![Word::from_u64(1)]);
+		assert_eq!(flat.value_vec_layout.n_const, 1);
+		assert_eq!(flat.and_constraints[0].a[0].value_index, ValueIndex(0));
+		assert_eq!(flat.and_constraints[1].a[0].value_index, ValueIndex(0));
+		assert_eq!(flat.and_constraints[1].b[0].value_index, ValueIndex(6));
+		assert_eq!(flat.and_constraints[1].c[0].value_index, ValueIndex(7));
 	}
 
 	#[test]
@@ -404,26 +494,12 @@ mod tests {
 	}
 
 	#[test]
-	#[should_panic(expected = "no base constants")]
-	fn flat_expansion_rejects_base_constants() {
-		let repeated = RepeatedConstraintSystem::new(
-			ConstraintSystem::new(
-				vec![Word::from_u64(1)],
-				ValueVecLayout {
-					n_const: 1,
-					n_inout: 1,
-					n_witness: 2,
-					n_internal: 0,
-					offset_inout: 1,
-					offset_witness: 2,
-					committed_total_len: 4,
-					n_scratch: 0,
-				},
-				vec![AndConstraint::default()],
-				vec![MulConstraint::default()],
-			),
-			1,
-		);
-		let _ = repeated.to_flat_constraint_system();
+	fn flat_expansion_rejects_duplicated_constants() {
+		let repeated = RepeatedConstraintSystem::new(base_constraint_system_with_constants(), 1);
+		let mut flat = repeated.to_flat_constraint_system();
+		flat.and_constraints[1].a[0].value_index = ValueIndex(4);
+
+		assert!(repeated.matches_flat_shape(&flat));
+		assert!(!repeated.matches_flat_constraint_system(&flat));
 	}
 }

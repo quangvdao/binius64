@@ -326,8 +326,9 @@ where
 /// equation, but evaluates the monster multilinear by scanning the base constraint system once and
 /// collapsing the repeated instance axis with an equality-kernel factor.
 ///
-/// The base constraint system must use local value indices. Concrete per-instance public values
-/// belong in public slots or committed public-data rows, not in the base constants vector.
+/// The base constraint system must use local value indices. Base constants are shared across every
+/// repeated instance; concrete per-instance public values belong in public slots or committed
+/// public-data rows.
 pub fn check_eval_repeated<F, C>(
 	repeated: &RepeatedConstraintSystem,
 	bitand_data: &OperatorData<C::Elem, BITAND_ARITY>,
@@ -372,6 +373,7 @@ where
 				repeated.log_instances(),
 				base_constraint_system.and_constraints.len(),
 				base_value_count,
+				base_constraint_system.value_vec_layout.n_const,
 			),
 		)
 	}?;
@@ -393,6 +395,7 @@ where
 				repeated.log_instances(),
 				base_constraint_system.mul_constraints.len(),
 				base_value_count,
+				base_constraint_system.value_vec_layout.n_const,
 			),
 		)
 	}?;

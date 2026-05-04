@@ -854,6 +854,37 @@ mod tests {
 		constraint_system
 	}
 
+	fn make_base_constraint_system_with_shared_constant(
+		base_constraint_count: usize,
+		base_value_count: usize,
+	) -> ConstraintSystem {
+		assert!(base_value_count >= 4);
+		let layout = ValueVecLayout {
+			n_const: 1,
+			n_inout: 1,
+			n_witness: base_value_count - 2,
+			n_internal: 0,
+			offset_inout: 1,
+			offset_witness: 2,
+			committed_total_len: base_value_count,
+			n_scratch: 0,
+		};
+		let and_constraints = (0..base_constraint_count)
+			.map(|row| AndConstraint {
+				a: vec![ShiftedValueIndex::plain(ValueIndex(0))],
+				b: vec![test_term(2 + (row * 3 % (base_value_count - 2)), row)],
+				c: vec![ShiftedValueIndex::plain(ValueIndex(0))],
+			})
+			.collect();
+
+		let mut constraint_system =
+			ConstraintSystem::new(vec![Word::ZERO], layout, and_constraints, Vec::new());
+		constraint_system
+			.validate_and_prepare()
+			.expect("constructed base constraint system with constants is valid");
+		constraint_system
+	}
+
 	fn zero_value_vec(constraint_system: &ConstraintSystem) -> ValueVec {
 		ValueVec::new_from_data(
 			constraint_system.value_vec_layout.clone(),
@@ -954,6 +985,44 @@ mod tests {
 		verifier
 			.verify_repeated(value_vec.public(), &repeated, &mut verifier_transcript)
 			.expect("repeated verifier accepts compact-key proof");
+		verifier_transcript
+			.finalize()
+			.expect("repeated transcript is exhausted");
+	}
+
+	#[test]
+	fn repeated_prover_accepts_shared_base_constants() {
+		const LOG_INV_RATE: usize = 1;
+		let base_constraint_system =
+			make_base_constraint_system_with_shared_constant(1 << 4, 1 << 5);
+		let repeated = RepeatedConstraintSystem::new(base_constraint_system, 2);
+		let flat_constraint_system = repeated.to_flat_constraint_system();
+		let value_vec = zero_value_vec(&flat_constraint_system);
+		verify_constraints(&flat_constraint_system, &value_vec)
+			.expect("zero witness satisfies repeated circuit with shared constants");
+
+		let verifier = Verifier::<StdDigest, _>::setup(
+			flat_constraint_system,
+			LOG_INV_RATE,
+			StdCompression::default(),
+		)
+		.expect("flat verifier setup succeeds");
+		let prover = Prover::<OptimalPackedB128, _, StdDigest>::setup_repeated(
+			verifier.clone(),
+			ParallelCompressionAdaptor::new(StdCompression::default()),
+			repeated.clone(),
+		)
+		.expect("repeated prover setup with shared constants succeeds");
+
+		let mut prover_transcript = ProverTranscript::new(StdChallenger::default());
+		prover
+			.prove_repeated(&repeated, value_vec.clone(), &mut prover_transcript)
+			.expect("compact repeated prover with shared constants succeeds");
+
+		let mut verifier_transcript = prover_transcript.into_verifier();
+		verifier
+			.verify_repeated(value_vec.public(), &repeated, &mut verifier_transcript)
+			.expect("repeated verifier accepts shared constants");
 		verifier_transcript
 			.finalize()
 			.expect("repeated transcript is exhausted");
